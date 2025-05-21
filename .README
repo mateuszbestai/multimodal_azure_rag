@@ -1,0 +1,22 @@
+"""
+The chat history functionality is implemented entirely on the frontend side using localStorage
+for persistence. This makes the implementation simpler as:
+
+1. No backend database is required
+2. The backend remains stateless
+3. Each API request is still independent
+
+If you want to add server-side persistence in the future, you would need to:
+
+1. Add a database (like SQLite, PostgreSQL, or MongoDB)
+2. Create a sessions table/collection to store chat sessions
+3. Add endpoints for:
+   - GET /api/chat-sessions - List all chat sessions
+   - POST /api/chat-sessions - Create a new chat session
+   - GET /api/chat-sessions/{id} - Get a specific chat session
+   - PUT /api/chat-sessions/{id} - Update a chat session
+   - DELETE /api/chat-sessions/{id} - Delete a chat session
+
+For now, the current implementation with client-side storage works well for
+individual users on their own devices.
+"""

@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut } from 'lucide-react';
+import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -26,6 +26,15 @@ interface SourcePreview {
   category?: string;
   title?: string;
   date?: Date;
+}
+
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: Date;
+  updatedAt: Date;
+  messages: Message[];
+  sourcePreviews: SourcePreview[];
 }
 
 interface ImageViewerProps {
@@ -69,6 +78,14 @@ const ImageViewer: React.FC<ImageViewerProps> = ({ url, onClose }) => {
 };
 
 function App() {
+  // Chat history state
+  const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
+  const [activeChatId, setActiveChatId] = useState<string | null>(null);
+  const [showChatSidebar, setShowChatSidebar] = useState(true);
+  const [isEditingTitle, setIsEditingTitle] = useState(false);
+  const [editTitle, setEditTitle] = useState('');
+  
+  // Current chat state
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -79,13 +96,137 @@ function App() {
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  // Load chat sessions from localStorage on initial render
+  useEffect(() => {
+    const savedSessions = localStorage.getItem('chatSessions');
+    if (savedSessions) {
+      try {
+        const parsedSessions = JSON.parse(savedSessions, (key, value) => {
+          // Convert string dates back to Date objects
+          if (key === 'timestamp' || key === 'createdAt' || key === 'updatedAt') {
+            return new Date(value);
+          }
+          return value;
+        });
+        setChatSessions(parsedSessions);
+        
+        // Set the most recent chat as active if available
+        if (parsedSessions.length > 0) {
+          const mostRecentChat = parsedSessions.sort((a, b) => 
+            new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
+          )[0];
+          setActiveChatId(mostRecentChat.id);
+          setMessages(mostRecentChat.messages);
+          setSourcePreviews(mostRecentChat.sourcePreviews);
+        } else {
+          createNewChat();
+        }
+      } catch (error) {
+        console.error('Error parsing saved chat sessions:', error);
+        createNewChat();
+      }
+    } else {
+      createNewChat();
+    }
+  }, []);
+
+  // Save chat sessions to localStorage whenever they change
+  useEffect(() => {
+    if (chatSessions.length > 0) {
+      localStorage.setItem('chatSessions', JSON.stringify(chatSessions));
+    }
+  }, [chatSessions]);
+
+  // Set current chat data when active chat changes
+  useEffect(() => {
+    if (activeChatId) {
+      const activeChat = chatSessions.find(chat => chat.id === activeChatId);
+      if (activeChat) {
+        setMessages(activeChat.messages);
+        setSourcePreviews(activeChat.sourcePreviews);
+      }
+    }
+  }, [activeChatId, chatSessions]);
+
+  // Scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const createNewChat = () => {
+    const newChatId = crypto.randomUUID();
+    const newChat: ChatSession = {
+      id: newChatId,
+      title: `New Chat ${new Date().toLocaleDateString()}`,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      messages: [],
+      sourcePreviews: []
+    };
+    
+    setChatSessions(prev => [newChat, ...prev]);
+    setActiveChatId(newChatId);
+    setMessages([]);
+    setSourcePreviews([]);
+    setInput('');
+  };
+
+  const deleteChat = (chatId: string) => {
+    setChatSessions(prev => prev.filter(chat => chat.id !== chatId));
+    
+    if (chatId === activeChatId) {
+      const remainingChats = chatSessions.filter(chat => chat.id !== chatId);
+      if (remainingChats.length > 0) {
+        setActiveChatId(remainingChats[0].id);
+        setMessages(remainingChats[0].messages);
+        setSourcePreviews(remainingChats[0].sourcePreviews);
+      } else {
+        createNewChat();
+      }
+    }
+  };
+
+  const startTitleEdit = (chatId: string) => {
+    const chat = chatSessions.find(c => c.id === chatId);
+    if (chat) {
+      setEditTitle(chat.title);
+      setIsEditingTitle(true);
+    }
+  };
+
+  const saveTitle = () => {
+    if (activeChatId && editTitle.trim()) {
+      setChatSessions(prev => 
+        prev.map(chat => 
+          chat.id === activeChatId 
+            ? { ...chat, title: editTitle.trim() } 
+            : chat
+        )
+      );
+      setIsEditingTitle(false);
+    }
+  };
+
+  const updateChatSession = (newMessages: Message[], newSourcePreviews: SourcePreview[]) => {
+    if (activeChatId) {
+      setChatSessions(prev => 
+        prev.map(chat => 
+          chat.id === activeChatId 
+            ? { 
+                ...chat, 
+                messages: newMessages, 
+                sourcePreviews: newSourcePreviews,
+                updatedAt: new Date()
+              } 
+            : chat
+        )
+      );
+    }
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!input.trim() || isLoading) return;
+    if (!input.trim() || isLoading || !activeChatId) return;
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
@@ -102,7 +243,9 @@ function App() {
       loading: true,
     };
 
-    setMessages(prev => [...prev, userMessage, assistantMessage]);
+    const updatedMessages = [...messages, userMessage, assistantMessage];
+    setMessages(updatedMessages);
+    updateChatSession(updatedMessages, sourcePreviews);
     setInput('');
     setIsLoading(true);
 
@@ -117,43 +260,67 @@ function App() {
 
       const data = await response.json();
 
-      setMessages(prev =>
-        prev.map(msg =>
-          msg.id === assistantMessage.id
-            ? {
-                ...msg,
-                content: data.response || 'No response could be generated',
-                loading: false,
-                sources: {
-                  pages: data.sources?.text?.map((s: any) => s.page) || [],
-                  images: data.sources?.images?.map((img: any) => img.url) || [],
-                },
-              }
-            : msg
-        )
+      const finalMessages = updatedMessages.map(msg =>
+        msg.id === assistantMessage.id
+          ? {
+              ...msg,
+              content: data.response || 'No response could be generated',
+              loading: false,
+              sources: {
+                pages: data.sources?.pages || [],
+                images: data.sources?.images || [],
+              },
+            }
+          : msg
       );
 
+      setMessages(finalMessages);
+
+      let updatedSourcePreviews = sourcePreviews;
       if (data.sourcePreviews) {
-        setSourcePreviews(
-          data.sourcePreviews.map((preview: any) => ({
+        updatedSourcePreviews = [
+          ...sourcePreviews,
+          ...data.sourcePreviews.map((preview: any) => ({
             ...preview,
             id: crypto.randomUUID(),
           }))
+        ];
+        setSourcePreviews(updatedSourcePreviews);
+      }
+
+      // Update chat title based on first user message if it's a new chat
+      const activeChat = chatSessions.find(chat => chat.id === activeChatId);
+      if (activeChat && activeChat.messages.length === 0) {
+        // This is the first message in a new chat, use it to set a more descriptive title
+        const newTitle = userMessage.content.length > 30 
+          ? userMessage.content.substring(0, 30) + '...' 
+          : userMessage.content;
+        
+        setChatSessions(prev => 
+          prev.map(chat => 
+            chat.id === activeChatId 
+              ? { ...chat, title: newTitle } 
+              : chat
+          )
         );
       }
+
+      updateChatSession(finalMessages, updatedSourcePreviews);
+
     } catch (error) {
       console.error('API request failed:', error);
-      setMessages(prev =>
-        prev.map(msg =>
-          msg.id === assistantMessage.id
-            ? {
-                ...msg,
-                content: 'Sorry, an error occurred while processing your request.',
-                loading: false,
-              }
-            : msg
-        )
+      const errorMessages = updatedMessages.map(msg =>
+        msg.id === assistantMessage.id
+          ? {
+              ...msg,
+              content: 'Sorry, an error occurred while processing your request.',
+              loading: false,
+            }
+          : msg
       );
+      
+      setMessages(errorMessages);
+      updateChatSession(errorMessages, sourcePreviews);
     } finally {
       setIsLoading(false);
     }
@@ -168,14 +335,20 @@ function App() {
   };
 
   const exportChat = () => {
-    const chatExport = messages
+    if (!activeChatId) return;
+    
+    const activeChat = chatSessions.find(chat => chat.id === activeChatId);
+    if (!activeChat) return;
+    
+    const chatExport = activeChat.messages
       .map(msg => `${msg.role.toUpperCase()} (${msg.timestamp.toISOString()}):\n${msg.content}\n`)
       .join('\n---\n\n');
+    
     const blob = new Blob([chatExport], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `chat-export-${new Date().toISOString()}.txt`;
+    a.download = `chat-export-${activeChat.title}-${new Date().toISOString()}.txt`;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -183,8 +356,11 @@ function App() {
   };
 
   const clearChat = () => {
-    setMessages([]);
-    setSourcePreviews([]);
+    if (activeChatId) {
+      setMessages([]);
+      setSourcePreviews([]);
+      updateChatSession([], []);
+    }
   };
 
   const filteredSourcePreviews = sourcePreviews.filter(preview => {
@@ -202,19 +378,136 @@ function App() {
     new Set(sourcePreviews.map(preview => preview.category).filter(Boolean))
   );
 
+  // Current active chat (if any)
+  const activeChat = activeChatId 
+    ? chatSessions.find(chat => chat.id === activeChatId) 
+    : null;
+
   return (
     <div className="flex h-screen bg-gray-50">
+      {/* Chat History Sidebar */}
+      <div 
+        className={`w-72 bg-gray-900 transform transition-transform duration-300 ease-in-out ${
+          showChatSidebar ? 'translate-x-0' : '-translate-x-full'
+        } absolute md:relative z-20 h-full overflow-hidden shadow-lg md:shadow-none`}
+      >
+        <div className="flex flex-col h-full">
+          <div className="p-4 border-b border-gray-800">
+            <button 
+              onClick={createNewChat}
+              className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2 px-4 rounded-lg transition-colors"
+            >
+              <Plus size={18} />
+              New Chat
+            </button>
+          </div>
+          
+          <div className="flex-1 overflow-y-auto">
+            <div className="p-2">
+              <h2 className="text-gray-400 text-xs uppercase font-semibold mb-2 px-2">Chat History</h2>
+              <div className="space-y-1">
+                {chatSessions.map(chat => (
+                  <div 
+                    key={chat.id}
+                    className={`group flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors ${
+                      chat.id === activeChatId 
+                        ? 'bg-gray-800 text-white' 
+                        : 'text-gray-300 hover:bg-gray-800/70'
+                    }`}
+                    onClick={() => setActiveChatId(chat.id)}
+                  >
+                    <div className="flex items-center gap-2 overflow-hidden">
+                      <MessageSquare size={16} />
+                      <span className="text-sm truncate">{chat.title}</span>
+                    </div>
+                    <div className={`opacity-0 group-hover:opacity-100 transition-opacity`}>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          startTitleEdit(chat.id);
+                        }}
+                        className="p-1 text-gray-400 hover:text-white transition-colors"
+                      >
+                        <Edit2 size={14} />
+                      </button>
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteChat(chat.id);
+                        }}
+                        className="p-1 text-gray-400 hover:text-red-500 transition-colors"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          
+          <div className="p-4 border-t border-gray-800 text-gray-400 text-xs">
+            <p>Your chats are stored locally in this browser</p>
+          </div>
+        </div>
+      </div>
+
+      {/* Chat Sidebar Toggle */}
+      <button
+        onClick={() => setShowChatSidebar(!showChatSidebar)}
+        className="fixed left-0 top-6 z-30 md:hidden bg-primary-600 text-white rounded-r-lg p-2"
+      >
+        {showChatSidebar ? <ArrowLeft size={20} /> : <MessageSquare size={20} />}
+      </button>
+
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm">
           <div className="max-w-4xl mx-auto flex justify-between items-center">
-            <h1 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
-              <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
-                <span className="text-white font-bold">AI</span>
+            {isEditingTitle && activeChat ? (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="text-lg border-b border-gray-300 focus:outline-none focus:border-primary-500 font-medium"
+                  autoFocus
+                />
+                <button 
+                  onClick={saveTitle}
+                  className="p-1 text-gray-600 hover:text-primary-600"
+                >
+                  <Save size={18} />
+                </button>
               </div>
-              Knowledge Assistant
-            </h1>
+            ) : (
+              <h1 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
+                {activeChat ? (
+                  <>
+                    <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
+                      <span className="text-white font-bold">AI</span>
+                    </div>
+                    <span className="truncate max-w-sm">
+                      {activeChat.title}
+                    </span>
+                    <button 
+                      onClick={() => startTitleEdit(activeChat.id)}
+                      className="p-1 text-gray-400 hover:text-gray-600"
+                    >
+                      <Edit2 size={16} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
+                      <span className="text-white font-bold">AI</span>
+                    </div>
+                    Knowledge Assistant
+                  </>
+                )}
+              </h1>
+            )}
             <div className="flex items-center gap-3">
               <button
                 onClick={exportChat}
@@ -237,92 +530,106 @@ function App() {
         {/* Messages */}
         <div className="flex-1 overflow-y-auto px-6 py-6">
           <div className="max-w-4xl mx-auto">
-            <TransitionGroup className="space-y-6">
-              {messages.map((message) => (
-                <CSSTransition key={message.id} timeout={300} classNames="message">
-                  <div
-                    className={`flex ${
-                      message.role === 'user' ? 'justify-end' : 'justify-start'
-                    } animate-slide-in`}
-                  >
-                    {message.role === 'assistant' && (
-                      <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center mr-3 mt-1">
-                        <span className="text-white text-sm font-semibold">AI</span>
-                      </div>
-                    )}
+            {messages.length === 0 ? (
+              <div className="flex items-center justify-center h-full">
+                <div className="text-center">
+                  <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <MessageSquare size={28} className="text-primary-600" />
+                  </div>
+                  <h2 className="text-2xl font-semibold text-gray-800 mb-2">Start a new conversation</h2>
+                  <p className="text-gray-500 mb-6 max-w-md">
+                    Ask any question about the documents in your knowledge base.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <TransitionGroup className="space-y-6">
+                {messages.map((message) => (
+                  <CSSTransition key={message.id} timeout={300} classNames="message">
                     <div
-                      className={`max-w-[80%] rounded-lg p-4 ${
-                        message.role === 'user'
-                          ? 'bg-primary-600 text-white'
-                          : 'bg-white shadow-sm border border-gray-200'
-                      }`}
+                      className={`flex ${
+                        message.role === 'user' ? 'justify-end' : 'justify-start'
+                      } animate-slide-in`}
                     >
-                      {message.loading ? (
-                        <div className="flex items-center gap-2">
-                          <Loader2 className="animate-spin" size={16} />
-                          <span>Processing your request...</span>
+                      {message.role === 'assistant' && (
+                        <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center mr-3 mt-1">
+                          <span className="text-white text-sm font-semibold">AI</span>
                         </div>
-                      ) : (
-                        <div className="space-y-2">
-                          <div className={`prose prose-sm max-w-none ${
-                            message.role === 'user' ? 'prose-invert' : ''
-                          }`}>
-                            <ReactMarkdown
-                              components={{
-                                code({ node, inline, className, children, ...props }) {
-                                  const match = /language-(\w+)/.exec(className || '');
-                                  return !inline && match ? (
-                                    <SyntaxHighlighter
-                                      style={tomorrow}
-                                      language={match[1]}
-                                      PreTag="div"
-                                      {...props}
-                                    >
-                                      {String(children).replace(/\n$/, '')}
-                                    </SyntaxHighlighter>
-                                  ) : (
-                                    <code className={className} {...props}>
-                                      {children}
-                                    </code>
-                                  );
-                                },
-                              }}
-                            >
-                              {message.content}
-                            </ReactMarkdown>
+                      )}
+                      <div
+                        className={`max-w-[80%] rounded-lg p-4 ${
+                          message.role === 'user'
+                            ? 'bg-primary-600 text-white'
+                            : 'bg-white shadow-sm border border-gray-200'
+                        }`}
+                      >
+                        {message.loading ? (
+                          <div className="flex items-center gap-2">
+                            <Loader2 className="animate-spin" size={16} />
+                            <span>Processing your request...</span>
                           </div>
-                          <div className="flex items-center justify-between mt-2 text-sm">
-                            <span className={`${
-                              message.role === 'user'
-                                ? 'text-primary-100'
-                                : 'text-gray-400'
+                        ) : (
+                          <div className="space-y-2">
+                            <div className={`prose prose-sm max-w-none ${
+                              message.role === 'user' ? 'prose-invert' : ''
                             }`}>
-                              {formatDistanceToNow(message.timestamp, { addSuffix: true })}
-                            </span>
-                            <button
-                              onClick={() => copyToClipboard(message.content)}
-                              className={`p-1 ${
+                              <ReactMarkdown
+                                components={{
+                                  code({ node, inline, className, children, ...props }) {
+                                    const match = /language-(\w+)/.exec(className || '');
+                                    return !inline && match ? (
+                                      <SyntaxHighlighter
+                                        style={tomorrow}
+                                        language={match[1]}
+                                        PreTag="div"
+                                        {...props}
+                                      >
+                                        {String(children).replace(/\n$/, '')}
+                                      </SyntaxHighlighter>
+                                    ) : (
+                                      <code className={className} {...props}>
+                                        {children}
+                                      </code>
+                                    );
+                                  },
+                                }}
+                              >
+                                {message.content}
+                              </ReactMarkdown>
+                            </div>
+                            <div className="flex items-center justify-between mt-2 text-sm">
+                              <span className={`${
                                 message.role === 'user'
-                                  ? 'text-primary-100 hover:text-white'
-                                  : 'text-gray-400 hover:text-gray-600'
-                              } transition-colors`}
-                              title="Copy message"
-                            >
-                              <Copy size={16} />
-                            </button>
+                                  ? 'text-primary-100'
+                                  : 'text-gray-400'
+                              }`}>
+                                {formatDistanceToNow(message.timestamp, { addSuffix: true })}
+                              </span>
+                              <button
+                                onClick={() => copyToClipboard(message.content)}
+                                className={`p-1 ${
+                                  message.role === 'user'
+                                    ? 'text-primary-100 hover:text-white'
+                                    : 'text-gray-400 hover:text-gray-600'
+                                } transition-colors`}
+                                title="Copy message"
+                              >
+                                <Copy size={16} />
+                              </button>
+                            </div>
                           </div>
+                        )}
+                      </div>
+                      {message.role === 'user' && (
+                        <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center ml-3 mt-1">
+                          <span className="text-gray-600 text-sm font-semibold">U</span>
                         </div>
                       )}
                     </div>
-                    {message.role === 'user' && (
-                      <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center ml-3 mt-1">
-                        <span className="text-gray-600 text-sm font-semibold">U</span>
-                      </div>
-                    )}
-                  </div>
-                </CSSTransition>
-              ))}
-            </TransitionGroup>
+                  </CSSTransition>
+                ))}
+              </TransitionGroup>
+            )}
             <div ref={messagesEndRef} />
           </div>
         </div>
@@ -351,14 +658,6 @@ function App() {
                     <Send size={16} />
                   )}
                   Send
-                </button>
-                <button
-                  type="button"
-                  onClick={clearChat}
-                  className="bg-red-600 text-white px-6 py-2 rounded-lg hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
-                >
-                  <X size={16} />
-                  Clear
                 </button>
               </div>
             </div>

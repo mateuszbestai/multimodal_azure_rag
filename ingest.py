@@ -296,7 +296,7 @@ async def process_document(pdf_path: str) -> RetrieverQueryEngine:
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    pdf_path = "data/pdfs/BAT_grupowe ubezpieczenie na życie UNIQA_ver_eng.pdf"
+    pdf_path = "data/pdfs/new-relic-2024-observability-forecast-report.pdf"
     
     try:
         query_engine = asyncio.run(process_document(pdf_path))

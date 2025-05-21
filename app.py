@@ -99,6 +99,7 @@ azure_openai_mm_llm = AzureOpenAIMultiModal(
 QA_PROMPT_TMPL = """\
 You are a helpful AI assistant with access to both text and images. 
 Use the document text and any associated images to provide the best possible answer.
+Do not use knowledge outside of the provided documents.
 
 DOCUMENT CONTEXT:
 {context_str}
@@ -318,6 +319,8 @@ def handle_chat():
             'error': str(e),
             'message': 'Failed to process your request. Please try again.'
         }), 500
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
