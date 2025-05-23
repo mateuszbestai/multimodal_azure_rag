@@ -1,3 +1,4 @@
+from datetime import datetime
 import os
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify
@@ -639,53 +640,174 @@ def handle_chat():
     try:
         data = request.get_json()
         query = data.get('message', '').strip()
+        content_filter = data.get('content_filter', 'all')
         
         if not query:
             return jsonify({'error': 'Empty query received'}), 400
         
+        logger.info(f"Processing query: {query} with filter: {content_filter}")
+        
+        # Execute the query
         response = query_engine.custom_query(query)
         
-        pages = list(response.metadata.get('pages', []))
-        
-        valid_images = []
-        for img in response.metadata.get('images', []):
-            img_url = img.node.image_url
-            # Skip validation for speed, but keep the URL
-            if img_url:
-                valid_images.append(img_url)
-
-        # Build source previews with Excel metadata extraction
+        # Initialize response components
+        pages = []
+        images = []
+        sheets = []
+        tables = []
         source_previews = []
+        data_insights = []
+        
+        # Process each source node
         for node in response.source_nodes:
-            # Parse metadata JSON to extract Excel info
-            try:
-                metadata_json = json.loads(node.metadata.get('metadata', '{}'))
-            except:
-                metadata_json = node.metadata
+            # Get metadata - handle both string JSON and dict formats
+            metadata = node.metadata
+            if isinstance(metadata.get('metadata'), str):
+                try:
+                    metadata_json = json.loads(metadata.get('metadata', '{}'))
+                except:
+                    metadata_json = metadata
+            else:
+                metadata_json = metadata
             
-            image_path = metadata_json.get('image_path') or node.metadata.get('image_path')
-            image_url = FrontendConfig.build_image_url(image_path) if image_path else None
-
-            source_previews.append({
-                'page': metadata_json.get('page_num', node.metadata.get('page_num', 'N/A')),
+            # Extract content type and other metadata
+            content_type = metadata_json.get('content_type', '')
+            node_type = metadata_json.get('node_type', '')
+            doc_id = metadata_json.get('doc_id', '')
+            
+            # Handle Excel-specific content
+            if 'excel' in content_type:
+                sheet_name = metadata_json.get('sheet_name', '')
+                sheet_index = metadata_json.get('sheet_index', 0)
+                table_name = metadata_json.get('table_name', '')
+                structure_type = metadata_json.get('structure_type', 'unknown')
+                
+                # Add sheet info
+                if node_type == 'sheet_summary' and sheet_name:
+                    sheet_info = {
+                        'name': sheet_name,
+                        'type': structure_type
+                    }
+                    if sheet_info not in sheets:
+                        sheets.append(sheet_info)
+                
+                # Add table info
+                if node_type == 'table_data' and table_name:
+                    table_info = {
+                        'name': table_name,
+                        'sheet': sheet_name,
+                        'rows': metadata_json.get('row_count', 0),
+                        'cols': metadata_json.get('col_count', 0)
+                    }
+                    if table_info not in tables:
+                        tables.append(table_info)
+                    
+                    # Add table structure insight
+                    headers = metadata_json.get('headers', '[]')
+                    if isinstance(headers, str):
+                        try:
+                            headers = json.loads(headers)
+                        except:
+                            headers = []
+                    
+                    if headers:
+                        data_insights.append({
+                            'type': 'table_structure',
+                            'message': f"Found table '{table_name}' in sheet '{sheet_name}' with {len(headers)} columns",
+                            'details': {
+                                'columns': headers[:10],  # Show first 10 columns
+                                'total_columns': len(headers)
+                            }
+                        })
+            
+            # Handle PDF content
+            elif content_type == 'pdf' or 'page_num' in metadata_json:
+                page_num = metadata_json.get('page_num')
+                if page_num and page_num not in pages:
+                    pages.append(page_num)
+            
+            # Handle images
+            image_path = metadata_json.get('image_path', '')
+            if image_path:
+                image_url = FrontendConfig.build_image_url(image_path)
+                if image_url and image_url not in images:
+                    images.append(image_url)
+            
+            # Create source preview
+            source_preview = {
+                'id': node.node_id,
+                'page': metadata_json.get('page_num'),
                 'content': node.get_content(metadata_mode=MetadataMode.LLM)[:250] + "...",
-                'imageUrl': image_url,
-                'contentType': metadata_json.get('content_type', ''),
-                'sheetName': metadata_json.get('sheet_name', ''),
-                'tableName': metadata_json.get('table_name', ''),
+                'imageUrl': FrontendConfig.build_image_url(image_path) if image_path else None,
+                'contentType': content_type,
+                'sheetName': metadata_json.get('sheet_name'),
+                'tableName': metadata_json.get('table_name'),
+                'category': 'Excel' if 'excel' in content_type else 'PDF' if content_type == 'pdf' else 'Document',
+                'title': metadata_json.get('file_name', doc_id),
+                'date': datetime.now()
+            }
+            source_previews.append(source_preview)
+        
+        # Add summary insights
+        if tables:
+            total_rows = sum(t.get('rows', 0) for t in tables)
+            data_insights.insert(0, {
+                'type': 'summary',
+                'message': f'Analyzing {len(tables)} tables with {total_rows:,} total rows across {len(sheets)} sheets'
             })
+        
+        # Check for relevant columns based on query
+        if any(keyword in query.lower() for keyword in ['column', 'header', 'field', 'attribute']):
+            relevant_columns = []
+            for node in response.source_nodes:
+                metadata = node.metadata
+                if isinstance(metadata.get('metadata'), str):
+                    try:
+                        metadata_json = json.loads(metadata.get('metadata', '{}'))
+                    except:
+                        metadata_json = metadata
+                else:
+                    metadata_json = metadata
+                
+                headers = metadata_json.get('headers', '[]')
+                if isinstance(headers, str):
+                    try:
+                        headers = json.loads(headers)
+                    except:
+                        headers = []
+                
+                for header in headers:
+                    if any(term in header.lower() for term in query.lower().split()):
+                        relevant_columns.append(header)
             
-        return jsonify({
+            if relevant_columns:
+                data_insights.append({
+                    'type': 'relevant_columns',
+                    'message': f'Found {len(set(relevant_columns))} columns matching your query',
+                    'details': {
+                        'columns': list(set(relevant_columns))[:20]  # Show up to 20 unique columns
+                    }
+                })
+        
+        # Build the response
+        response_data = {
             'response': response.response,
             'sources': {
-                'pages': pages,
-                'images': valid_images
+                'pages': sorted(list(set(pages))) if pages else [],
+                'images': images,
+                'sheets': sheets,
+                'tables': tables
             },
-            'sourcePreviews': source_previews
-        })
+            'sourcePreviews': source_previews,
+            'dataInsights': data_insights
+        }
+        
+        logger.info(f"Sending response with {len(sheets)} sheets, {len(tables)} tables, {len(data_insights)} insights")
+        
+        return jsonify(response_data)
             
     except Exception as e:
-        logger.error(f"Processing error: {str(e)}")
+        logger.error(f"Processing error: {str(e)}", exc_info=True)
         return jsonify({
             'error': str(e),
             'message': 'Failed to process your request. Please try again.'
@@ -743,7 +865,7 @@ def upload_file():
 
 @app.route('/api/chat_enhanced', methods=['POST'])
 def handle_chat_enhanced():
-    """Enhanced chat endpoint - for now just redirect to basic chat."""
+    """Enhanced chat endpoint - uses the same logic as basic chat."""
     return handle_chat()
 
 @app.route('/api/files', methods=['GET'])
