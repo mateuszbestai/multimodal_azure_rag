@@ -2,26 +2,34 @@
 python-dotenv>=1.0.0
 nest-asyncio>=1.5.6
 
-# Web framework
-flask>=2.2.3
+# Web framework and file handling
+flask>=2.3.0
 flask-cors>=4.0.0
-requests>=2.30.0
+requests>=2.31.0
+Werkzeug>=2.3.0
 
 # Azure services
 azure-core>=1.29.5
 azure-search-documents>=11.4.0
 azure-ai-formrecognizer>=3.3.0
-azure-storage-blob>=12.17.0
+azure-storage-blob>=12.19.0
 
 # PDF processing
 PyMuPDF>=1.23.0
 
-# Excel processing
+# Excel processing and data analysis
 openpyxl>=3.1.2
-pandas>=2.0.3
+pandas>=2.1.0
+xlrd>=2.0.1
+xlsxwriter>=3.1.0
 xlwings>=0.30.12
 pywin32>=306;platform_system=="Windows"
-numpy>=1.24.3
+numpy>=1.25.0
+python-dateutil>=2.8.2
+
+# Data processing utilities
+pathlib2>=2.3.7;python_version<"3.4"
+typing-extensions>=4.7.0
 
 # LlamaIndex components
 llama-index-core>=0.10.0
@@ -30,3 +38,12 @@ llama-index-llms-azure-openai>=0.1.5
 llama-index-multi-modal-llms-azure-openai>=0.1.3
 llama-index-vector-stores-azureaisearch>=0.1.3
 llama-index-readers-file>=0.1.2
+
+# Optional: Enhanced Excel features (uncomment if needed)
+# xlwings>=0.30.0  # For Excel automation (Windows/Mac only)
+# pyxlsb>=1.0.10   # For .xlsb binary Excel files
+# xlutils>=2.0.0   # Additional Excel utilities
+
+# Development and debugging (optional)
+# logging>=0.4.9.6
+# colorama>=0.4.6  # For colored console output

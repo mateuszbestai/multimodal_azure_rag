@@ -34,6 +34,8 @@ from llama_index.vector_stores.azureaisearch import (
 import asyncio
 from azure.storage.blob.aio import BlobServiceClient
 
+from excel_ingest import ExcelProcessor
+
 nest_asyncio.apply()
 load_dotenv()
 
@@ -53,7 +55,7 @@ AZURE_DOC_INTELLIGENCE_ENDPOINT = os.getenv("AZURE_DOC_INTELLIGENCE_ENDPOINT")
 AZURE_DOC_INTELLIGENCE_KEY = os.getenv("AZURE_DOC_INTELLIGENCE_KEY")
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = "rag-demo-images"
-INDEX_NAME = "azure-multimodal-search"
+INDEX_NAME = "azure-multimodal-search-new"
 DOWNLOAD_PATH = "pdf-files"
 
 # Initialize Azure OpenAI settings first
@@ -92,6 +94,18 @@ metadata_fields = {
     "image_path": ("image_path", MetadataIndexFieldType.STRING),
     "full_text": ("full_text", MetadataIndexFieldType.STRING),
 }
+
+SUPPORTED_EXTENSIONS = {'.pdf', '.xlsx', '.xls', '.xlsm'}
+
+def get_file_type(file_path: str) -> str:
+    """Determine file type from extension."""
+    extension = Path(file_path).suffix.lower()
+    if extension == '.pdf':
+        return 'pdf'
+    elif extension in {'.xlsx', '.xls', '.xlsm'}:
+        return 'excel'
+    else:
+        raise ValueError(f"Unsupported file type: {extension}")
 
 # ================== Document Processing ==================
 def create_folder_structure(base_path: str, pdf_path: str) -> str:
@@ -261,17 +275,73 @@ def create_or_load_index(
             show_progress=True,
         )
 
-# ================== Main Processing Pipeline ==================
-async def process_document(pdf_path: str) -> RetrieverQueryEngine:
-    """End-to-end document processing pipeline."""
+async def process_document(file_path: str) -> RetrieverQueryEngine:
+    """Enhanced document processing pipeline supporting both PDF and Excel files."""
     try:
-        document_data = extract_document_data(pdf_path)
-        image_urls = await upload_images_concurrently(document_data["images"])
-        logging.info(f"Uploaded {len(image_urls)} images")
+        file_type = get_file_type(file_path)
         
-        nodes = create_search_nodes(document_data, image_urls)
+        if file_type == 'pdf':
+            return await process_pdf_document(file_path)
+        elif file_type == 'excel':
+            return await process_excel_document(file_path)
+        else:
+            raise ValueError(f"Unsupported file type: {file_type}")
+            
+    except Exception as e:
+        logging.error(f"Processing failed: {str(e)}")
+        raise
+
+# ================== Main Processing Pipeline ==================
+async def process_pdf_document(pdf_path: str) -> RetrieverQueryEngine:
+    """Process PDF documents (your existing logic)."""
+    document_data = extract_document_data(pdf_path)
+    image_urls = await upload_images_concurrently(document_data["images"])
+    logging.info(f"Uploaded {len(image_urls)} images")
+    
+    nodes = create_search_nodes(document_data, image_urls)
+    
+    index = create_or_load_index(
+        text_nodes=nodes,
+        index_client=index_client,
+        embed_model=Settings.embed_model,
+        llm=Settings.llm,
+        use_existing_index=False
+    )
+
+    response_synthesizer = get_response_synthesizer(
+        llm=Settings.llm,
+        response_mode="compact"
+    )
+    
+    return RetrieverQueryEngine(
+        retriever=index.as_retriever(similarity_top_k=3),
+        response_synthesizer=response_synthesizer
+    )
+
+async def process_excel_document(excel_path: str) -> RetrieverQueryEngine:
+    """Process Excel documents using the new ExcelProcessor."""
+    try:
+        # Initialize Excel processor
+        excel_processor = ExcelProcessor(
+            blob_connection_string=BLOB_CONNECTION_STRING,
+            container_name=BLOB_CONTAINER_NAME
+        )
         
-        # Pass the SearchIndexClient instead of SearchClient.
+        # Process Excel file
+        logging.info(f"Processing Excel file: {excel_path}")
+        excel_data = await excel_processor.process_excel_file(excel_path)
+        
+        # Upload any extracted images
+        image_urls = {}
+        if excel_data.get("images"):
+            image_urls = await excel_processor.upload_images_to_blob(excel_data["images"])
+            logging.info(f"Uploaded {len(image_urls)} Excel images")
+        
+        # Create search nodes
+        nodes = excel_processor.create_search_nodes(excel_data, image_urls)
+        logging.info(f"Created {len(nodes)} search nodes from Excel file")
+        
+        # Create or load index
         index = create_or_load_index(
             text_nodes=nodes,
             index_client=index_client,
@@ -286,20 +356,124 @@ async def process_document(pdf_path: str) -> RetrieverQueryEngine:
         )
         
         return RetrieverQueryEngine(
-            retriever=index.as_retriever(similarity_top_k=3),
+            retriever=index.as_retriever(similarity_top_k=5),  # Increased for Excel data
             response_synthesizer=response_synthesizer
         )
-
+        
     except Exception as e:
-        logging.error(f"Processing failed: {str(e)}")
+        logging.error(f"Excel processing failed: {str(e)}")
         raise
 
-if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    pdf_path = "data/pdfs/new-relic-2024-observability-forecast-report.pdf"
+async def process_multiple_files(file_paths: List[str]) -> Dict[str, RetrieverQueryEngine]:
+    """Process multiple files and return individual query engines."""
+    query_engines = {}
+    
+    for file_path in file_paths:
+        try:
+            file_name = Path(file_path).name
+            logging.info(f"Processing file: {file_name}")
+            
+            query_engine = await process_document(file_path)
+            query_engines[file_name] = query_engine
+            
+            logging.info(f"Successfully processed: {file_name}")
+            
+        except Exception as e:
+            logging.error(f"Failed to process {file_path}: {str(e)}")
+            continue
+    
+    return query_engines
+
+async def process_directory(directory_path: str) -> Dict[str, RetrieverQueryEngine]:
+    """Process all supported files in a directory."""
+    directory = Path(directory_path)
+    
+    if not directory.exists():
+        raise FileNotFoundError(f"Directory not found: {directory_path}")
+    
+    # Find all supported files
+    file_paths = []
+    for extension in SUPPORTED_EXTENSIONS:
+        file_paths.extend(directory.glob(f"*{extension}"))
+    
+    if not file_paths:
+        logging.warning(f"No supported files found in {directory_path}")
+        return {}
+    
+    logging.info(f"Found {len(file_paths)} files to process")
+    return await process_multiple_files([str(p) for p in file_paths])
+
+# ================== Enhanced CLI Interface ==================
+def main():
+    """Enhanced main function with file type detection."""
+    import argparse
+    
+    parser = argparse.ArgumentParser(description="Process documents (PDF or Excel) for RAG system")
+    parser.add_argument("path", help="Path to file or directory to process")
+    parser.add_argument("--file-type", choices=['pdf', 'excel', 'auto'], default='auto',
+                      help="Specify file type (auto-detect by default)")
+    parser.add_argument("--batch", action='store_true',
+                      help="Process entire directory")
+    parser.add_argument("--output-dir", default="output",
+                      help="Output directory for processed files")
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('document_processing.log'),
+            logging.StreamHandler()
+        ]
+    )
     
     try:
-        query_engine = asyncio.run(process_document(pdf_path))
-        logging.info("Processing completed successfully")
+        if args.batch:
+            # Process entire directory
+            query_engines = asyncio.run(process_directory(args.path))
+            logging.info(f"Successfully processed {len(query_engines)} files")
+            
+            # Save results summary
+            summary = {
+                "processed_files": list(query_engines.keys()),
+                "total_count": len(query_engines),
+                "timestamp": time.time()
+            }
+            
+            output_dir = Path(args.output_dir)
+            output_dir.mkdir(exist_ok=True)
+            
+            with open(output_dir / "processing_summary.json", "w") as f:
+                json.dump(summary, f, indent=2)
+                
+        else:
+            # Process single file
+            if args.file_type == 'auto':
+                file_type = get_file_type(args.path)
+            else:
+                file_type = args.file_type
+            
+            logging.info(f"Processing {file_type} file: {args.path}")
+            query_engine = asyncio.run(process_document(args.path))
+            logging.info("Processing completed successfully")
+            
     except Exception as e:
         logging.error(f"Fatal error: {str(e)}")
+        return 1
+    
+    return 0
+
+if __name__ == '__main__':
+    exit(main())
+
+# if __name__ == '__main__':
+#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+#     pdf_path = "data/pdfs/new-relic-2024-observability-forecast-report.pdf"
+    
+#     try:
+#         query_engine = asyncio.run(process_document(pdf_path))
+#         logging.info("Processing completed successfully")
+#     except Exception as e:
+#         logging.error(f"Fatal error: {str(e)}")

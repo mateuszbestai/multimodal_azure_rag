@@ -1,10 +1,12 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft } from 'lucide-react';
+import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft, Upload, Settings } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { CSSTransition, TransitionGroup } from 'react-transition-group';
+import FileUpload from './components/FileUpload';
+import EnhancedChatInterface from './components/EnhancedChatInterface';
 
 interface Message {
   id: string;
@@ -14,18 +16,31 @@ interface Message {
   sources?: {
     pages: number[];
     images?: string[];
+    sheets?: Array<{name: string; type: string}>;
+    tables?: Array<{name: string; sheet: string; rows: number; cols: number}>;
   };
+  dataInsights?: Array<{
+    type: string;
+    message: string;
+    details?: any;
+  }>;
   loading?: boolean;
 }
 
 interface SourcePreview {
   id: string;
-  page: number;
+  page?: number;
   content: string;
   imageUrl?: string;
   category?: string;
   title?: string;
   date?: Date;
+  contentType?: string;
+  sheetName?: string;
+  tableName?: string;
+  nodeType?: string;
+  rowCount?: number;
+  colCount?: number;
 }
 
 interface ChatSession {
@@ -35,6 +50,22 @@ interface ChatSession {
   updatedAt: Date;
   messages: Message[];
   sourcePreviews: SourcePreview[];
+}
+
+interface UploadedFile {
+  docId: string;
+  fileName: string;
+  contentType: string;
+  sheetCount?: number;
+}
+
+interface UploadResult {
+  filename: string;
+  file_type: string;
+  summary: string;
+  node_count: number;
+  sheet_count?: number;
+  image_count?: number;
 }
 
 interface ImageViewerProps {
@@ -78,6 +109,9 @@ const ImageViewer: React.FC<ImageViewerProps> = ({ url, onClose }) => {
 };
 
 function App() {
+  // Navigation state
+  const [activeView, setActiveView] = useState<'chat' | 'upload' | 'files'>('chat');
+  
   // Chat history state
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -87,13 +121,16 @@ function App() {
   
   // Current chat state
   const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [sourcePreviews, setSourcePreviews] = useState<SourcePreview[]>([]);
   const [showReferences, setShowReferences] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  
+  // File management state
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFile[]>([]);
+  
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   // Load chat sessions from localStorage on initial render
@@ -102,7 +139,6 @@ function App() {
     if (savedSessions) {
       try {
         const parsedSessions = JSON.parse(savedSessions, (key, value) => {
-          // Convert string dates back to Date objects
           if (key === 'timestamp' || key === 'createdAt' || key === 'updatedAt') {
             return new Date(value);
           }
@@ -110,7 +146,6 @@ function App() {
         });
         setChatSessions(parsedSessions);
         
-        // Set the most recent chat as active if available
         if (parsedSessions.length > 0) {
           const mostRecentChat = parsedSessions.sort((a, b) => 
             new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
@@ -168,7 +203,7 @@ function App() {
     setActiveChatId(newChatId);
     setMessages([]);
     setSourcePreviews([]);
-    setInput('');
+    setActiveView('chat');
   };
 
   const deleteChat = (chatId: string) => {
@@ -224,13 +259,12 @@ function App() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!input.trim() || isLoading || !activeChatId) return;
+  const handleSendMessage = async (message: string, contentFilter: string = 'all') => {
+    if (!message.trim() || isLoading || !activeChatId) return;
 
     const userMessage: Message = {
       id: crypto.randomUUID(),
-      content: input,
+      content: message,
       role: 'user',
       timestamp: new Date(),
     };
@@ -246,14 +280,16 @@ function App() {
     const updatedMessages = [...messages, userMessage, assistantMessage];
     setMessages(updatedMessages);
     updateChatSession(updatedMessages, sourcePreviews);
-    setInput('');
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:5001/api/chat', {
+      const response = await fetch('http://localhost:5001/api/chat_enhanced', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: input }),
+        body: JSON.stringify({ 
+          message: message,
+          content_filter: contentFilter 
+        }),
       });
 
       if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
@@ -266,10 +302,8 @@ function App() {
               ...msg,
               content: data.response || 'No response could be generated',
               loading: false,
-              sources: {
-                pages: data.sources?.pages || [],
-                images: data.sources?.images || [],
-              },
+              sources: data.sources || { pages: [], images: [], sheets: [], tables: [] },
+              dataInsights: data.dataInsights || [],
             }
           : msg
       );
@@ -282,7 +316,7 @@ function App() {
           ...sourcePreviews,
           ...data.sourcePreviews.map((preview: any) => ({
             ...preview,
-            id: crypto.randomUUID(),
+            id: preview.id || crypto.randomUUID(),
           }))
         ];
         setSourcePreviews(updatedSourcePreviews);
@@ -291,7 +325,6 @@ function App() {
       // Update chat title based on first user message if it's a new chat
       const activeChat = chatSessions.find(chat => chat.id === activeChatId);
       if (activeChat && activeChat.messages.length === 0) {
-        // This is the first message in a new chat, use it to set a more descriptive title
         const newTitle = userMessage.content.length > 30 
           ? userMessage.content.substring(0, 30) + '...' 
           : userMessage.content;
@@ -363,6 +396,16 @@ function App() {
     }
   };
 
+  const handleUploadComplete = (result: UploadResult) => {
+    console.log('File uploaded successfully:', result);
+    // Optionally switch to chat view after successful upload
+    setActiveView('chat');
+  };
+
+  const handleFilesChange = (files: UploadedFile[]) => {
+    setUploadedFiles(files);
+  };
+
   const filteredSourcePreviews = sourcePreviews.filter(preview => {
     const matchesSearch = searchTerm
       ? preview.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
@@ -378,10 +421,15 @@ function App() {
     new Set(sourcePreviews.map(preview => preview.category).filter(Boolean))
   );
 
-  // Current active chat (if any)
   const activeChat = activeChatId 
     ? chatSessions.find(chat => chat.id === activeChatId) 
     : null;
+
+  const navigationItems = [
+    { id: 'chat', label: 'Chat', icon: MessageSquare },
+    { id: 'upload', label: 'Upload', icon: Upload },
+    { id: 'files', label: 'Files', icon: Settings },
+  ];
 
   return (
     <div className="flex h-screen bg-gray-50">
@@ -395,11 +443,32 @@ function App() {
           <div className="p-4 border-b border-gray-800">
             <button 
               onClick={createNewChat}
-              className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2 px-4 rounded-lg transition-colors"
+              className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2 px-4 rounded-lg transition-colors mb-4"
             >
               <Plus size={18} />
               New Chat
             </button>
+            
+            {/* Navigation */}
+            <div className="flex gap-1 bg-gray-800 rounded-lg p-1">
+              {navigationItems.map((item) => {
+                const IconComponent = item.icon;
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setActiveView(item.id as any)}
+                    className={`flex-1 flex items-center justify-center gap-1 py-2 px-3 rounded-md text-sm transition-colors ${
+                      activeView === item.id
+                        ? 'bg-primary-600 text-white'
+                        : 'text-gray-300 hover:text-white hover:bg-gray-700'
+                    }`}
+                  >
+                    <IconComponent size={16} />
+                    {item.label}
+                  </button>
+                );
+              })}
+            </div>
           </div>
           
           <div className="flex-1 overflow-y-auto">
@@ -414,7 +483,10 @@ function App() {
                         ? 'bg-gray-800 text-white' 
                         : 'text-gray-300 hover:bg-gray-800/70'
                     }`}
-                    onClick={() => setActiveChatId(chat.id)}
+                    onClick={() => {
+                      setActiveChatId(chat.id);
+                      setActiveView('chat');
+                    }}
                   >
                     <div className="flex items-center gap-2 overflow-hidden">
                       <MessageSquare size={16} />
@@ -460,7 +532,7 @@ function App() {
         {showChatSidebar ? <ArrowLeft size={20} /> : <MessageSquare size={20} />}
       </button>
 
-      {/* Main Chat Area */}
+      {/* Main Content Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm">
@@ -483,185 +555,118 @@ function App() {
               </div>
             ) : (
               <h1 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
-                {activeChat ? (
-                  <>
-                    <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
-                      <span className="text-white font-bold">AI</span>
-                    </div>
-                    <span className="truncate max-w-sm">
-                      {activeChat.title}
-                    </span>
-                    <button 
-                      onClick={() => startTitleEdit(activeChat.id)}
-                      className="p-1 text-gray-400 hover:text-gray-600"
-                    >
-                      <Edit2 size={16} />
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
-                      <span className="text-white font-bold">AI</span>
-                    </div>
-                    Knowledge Assistant
-                  </>
+                <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
+                  <span className="text-white font-bold">AI</span>
+                </div>
+                <span className="truncate max-w-sm">
+                  {activeView === 'chat' && activeChat ? activeChat.title : 
+                   activeView === 'upload' ? 'Upload Documents' :
+                   activeView === 'files' ? 'File Management' : 'Knowledge Assistant'}
+                </span>
+                {activeView === 'chat' && activeChat && (
+                  <button 
+                    onClick={() => startTitleEdit(activeChat.id)}
+                    className="p-1 text-gray-400 hover:text-gray-600"
+                  >
+                    <Edit2 size={16} />
+                  </button>
                 )}
               </h1>
             )}
-            <div className="flex items-center gap-3">
-              <button
-                onClick={exportChat}
-                className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-md transition-colors"
-              >
-                <Download size={16} />
-                Export
-              </button>
-              <button
-                onClick={clearChat}
-                className="flex items-center gap-2 px-3 py-1.5 text-sm text-red-600 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
-              >
-                <X size={16} />
-                Clear
-              </button>
-            </div>
+            
+            {activeView === 'chat' && (
+              <div className="flex items-center gap-3">
+                <button
+                  onClick={exportChat}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-md transition-colors"
+                >
+                  <Download size={16} />
+                  Export
+                </button>
+                <button
+                  onClick={clearChat}
+                  className="flex items-center gap-2 px-3 py-1.5 text-sm text-red-600 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
+                >
+                  <X size={16} />
+                  Clear
+                </button>
+              </div>
+            )}
           </div>
         </header>
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
-          <div className="max-w-4xl mx-auto">
-            {messages.length === 0 ? (
-              <div className="flex items-center justify-center h-full">
-                <div className="text-center">
-                  <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <MessageSquare size={28} className="text-primary-600" />
-                  </div>
-                  <h2 className="text-2xl font-semibold text-gray-800 mb-2">Start a new conversation</h2>
-                  <p className="text-gray-500 mb-6 max-w-md">
-                    Ask any question about the documents in your knowledge base.
-                  </p>
-                </div>
-              </div>
-            ) : (
-              <TransitionGroup className="space-y-6">
-                {messages.map((message) => (
-                  <CSSTransition key={message.id} timeout={300} classNames="message">
-                    <div
-                      className={`flex ${
-                        message.role === 'user' ? 'justify-end' : 'justify-start'
-                      } animate-slide-in`}
-                    >
-                      {message.role === 'assistant' && (
-                        <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center mr-3 mt-1">
-                          <span className="text-white text-sm font-semibold">AI</span>
-                        </div>
-                      )}
-                      <div
-                        className={`max-w-[80%] rounded-lg p-4 ${
-                          message.role === 'user'
-                            ? 'bg-primary-600 text-white'
-                            : 'bg-white shadow-sm border border-gray-200'
-                        }`}
-                      >
-                        {message.loading ? (
-                          <div className="flex items-center gap-2">
-                            <Loader2 className="animate-spin" size={16} />
-                            <span>Processing your request...</span>
-                          </div>
-                        ) : (
-                          <div className="space-y-2">
-                            <div className={`prose prose-sm max-w-none ${
-                              message.role === 'user' ? 'prose-invert' : ''
-                            }`}>
-                              <ReactMarkdown
-                                components={{
-                                  code({ node, inline, className, children, ...props }) {
-                                    const match = /language-(\w+)/.exec(className || '');
-                                    return !inline && match ? (
-                                      <SyntaxHighlighter
-                                        style={tomorrow}
-                                        language={match[1]}
-                                        PreTag="div"
-                                        {...props}
-                                      >
-                                        {String(children).replace(/\n$/, '')}
-                                      </SyntaxHighlighter>
-                                    ) : (
-                                      <code className={className} {...props}>
-                                        {children}
-                                      </code>
-                                    );
-                                  },
-                                }}
-                              >
-                                {message.content}
-                              </ReactMarkdown>
-                            </div>
-                            <div className="flex items-center justify-between mt-2 text-sm">
-                              <span className={`${
-                                message.role === 'user'
-                                  ? 'text-primary-100'
-                                  : 'text-gray-400'
-                              }`}>
-                                {formatDistanceToNow(message.timestamp, { addSuffix: true })}
-                              </span>
-                              <button
-                                onClick={() => copyToClipboard(message.content)}
-                                className={`p-1 ${
-                                  message.role === 'user'
-                                    ? 'text-primary-100 hover:text-white'
-                                    : 'text-gray-400 hover:text-gray-600'
-                                } transition-colors`}
-                                title="Copy message"
-                              >
-                                <Copy size={16} />
-                              </button>
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                      {message.role === 'user' && (
-                        <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center ml-3 mt-1">
-                          <span className="text-gray-600 text-sm font-semibold">U</span>
-                        </div>
-                      )}
-                    </div>
-                  </CSSTransition>
-                ))}
-              </TransitionGroup>
-            )}
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
-
-        {/* Input Form */}
-        <div className="bg-white border-t border-gray-200 px-6 py-4">
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
-            <div className="flex gap-4">
-              <input
-                type="text"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                placeholder="Ask a question..."
-                className="flex-1 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50"
-                disabled={isLoading}
+        {/* Main Content */}
+        <div className="flex-1 overflow-hidden">
+          {activeView === 'chat' && (
+            <EnhancedChatInterface
+              messages={messages}
+              isLoading={isLoading}
+              onSendMessage={handleSendMessage}
+            />
+          )}
+          
+          {activeView === 'upload' && (
+            <div className="p-6 max-w-4xl mx-auto">
+              <FileUpload
+                onUploadComplete={handleUploadComplete}
+                onFilesChange={handleFilesChange}
               />
-              <div className="flex gap-2">
-                <button
-                  type="submit"
-                  disabled={isLoading || !input.trim()}
-                  className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
-                >
-                  {isLoading ? (
-                    <Loader2 className="animate-spin" size={16} />
-                  ) : (
-                    <Send size={16} />
-                  )}
-                  Send
-                </button>
+            </div>
+          )}
+          
+          {activeView === 'files' && (
+            <div className="p-6 max-w-4xl mx-auto">
+              <div className="bg-white rounded-lg shadow-sm border p-6">
+                <h2 className="text-lg font-semibold text-gray-800 mb-4">File Management</h2>
+                <p className="text-gray-600 mb-6">
+                  Manage your uploaded documents and their processing status.
+                </p>
+                
+                {uploadedFiles.length > 0 ? (
+                  <div className="space-y-3">
+                    {uploadedFiles.map((file) => (
+                      <div key={file.docId} className="flex items-center justify-between p-4 border rounded-lg hover:bg-gray-50">
+                        <div className="flex items-center gap-3">
+                          {file.contentType.includes('excel') ? (
+                            <div className="w-10 h-10 bg-green-100 rounded-lg flex items-center justify-center">
+                              <span className="text-green-600 text-xs font-bold">XLS</span>
+                            </div>
+                          ) : (
+                            <div className="w-10 h-10 bg-red-100 rounded-lg flex items-center justify-center">
+                              <span className="text-red-600 text-xs font-bold">PDF</span>
+                            </div>
+                          )}
+                          <div>
+                            <p className="font-medium text-gray-900">{file.fileName}</p>
+                            <p className="text-sm text-gray-500 capitalize">
+                              {file.contentType.replace('_', ' ')}
+                              {file.sheetCount && ` • ${file.sheetCount} sheets`}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span className="px-2 py-1 bg-green-100 text-green-800 text-xs rounded-full">
+                            Processed
+                          </span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="text-center py-8">
+                    <Upload className="mx-auto text-gray-300 mb-4" size={48} />
+                    <p className="text-gray-500">No files uploaded yet</p>
+                    <button
+                      onClick={() => setActiveView('upload')}
+                      className="mt-4 bg-primary-600 text-white px-4 py-2 rounded-lg hover:bg-primary-700 transition-colors"
+                    >
+                      Upload Your First File
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
-          </form>
+          )}
         </div>
       </div>
 
@@ -721,7 +726,9 @@ function App() {
                     <h3 className="font-medium text-gray-900 mb-1">{preview.title}</h3>
                   )}
                   <div className="flex items-center gap-2 text-sm text-gray-500 mb-2">
-                    <span>Page {preview.page}</span>
+                    {preview.page && <span>Page {preview.page}</span>}
+                    {preview.sheetName && <span>Sheet: {preview.sheetName}</span>}
+                    {preview.tableName && <span>Table: {preview.tableName}</span>}
                     {preview.date && (
                       <>
                         <span>•</span>
@@ -734,7 +741,7 @@ function App() {
                     <div className="relative aspect-video bg-gray-50 rounded-md overflow-hidden group">
                       <img
                         src={preview.imageUrl}
-                        alt={preview.title || `Preview from page ${preview.page}`}
+                        alt={preview.title || `Preview from ${preview.contentType}`}
                         className="w-full h-full object-contain p-2"
                         loading="lazy"
                       />
