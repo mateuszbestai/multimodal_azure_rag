@@ -1,19 +1,20 @@
 import os
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, Response, stream_with_context
 from flask_cors import CORS
 from azure.core.credentials import AzureKeyCredential
 from azure.search.documents import SearchClient
 from typing import Optional, List
 import logging
 import requests
+import json
 
 # LlamaIndex imports
 from llama_index.core import StorageContext, VectorStoreIndex, Settings
 from llama_index.core.schema import ImageNode, NodeWithScore, MetadataMode
 from llama_index.core.prompts import PromptTemplate
 from llama_index.core.retrievers import BaseRetriever
-from llama_index.core.base.response.schema import Response
+from llama_index.core.base.response.schema import Response as LlamaResponse
 from llama_index.core.query_engine import CustomQueryEngine
 from llama_index.embeddings.azure_openai import AzureOpenAIEmbedding
 from llama_index.llms.azure_openai import AzureOpenAI
@@ -31,6 +32,37 @@ load_dotenv()
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
+# ================== Initialize Flask FIRST ==================
+app = Flask(__name__)
+
+# ================== Configure CORS after creating app ==================
+# Enhanced CORS configuration for streaming support
+cors_config = {
+    "origins": ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"],  # Add your frontend URLs
+    "methods": ["GET", "POST", "OPTIONS"],
+    "allow_headers": ["Content-Type", "Authorization", "X-Requested-With"],
+    "expose_headers": ["Content-Type", "X-Accel-Buffering"],
+    "supports_credentials": True,
+    "send_wildcard": False,
+    "vary_header": True
+}
+
+# Apply CORS with enhanced configuration
+CORS(app, resources={
+    r"/api/*": cors_config
+})
+
+# Additional headers for SSE endpoints
+@app.after_request
+def after_request(response):
+    # Headers specifically for SSE/streaming endpoints
+    if request.path == '/api/chat/stream':
+        response.headers['Cache-Control'] = 'no-cache, no-transform'
+        response.headers['X-Accel-Buffering'] = 'no'
+        response.headers['Connection'] = 'keep-alive'
+    return response
+
+# ================== Configuration Class ==================
 class FrontendConfig:
     """Centralized configuration for frontend components"""
     AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
@@ -88,10 +120,6 @@ def validate_env():
 
 validate_env()
 
-# ================== Initialize Flask ==================
-app = Flask(__name__)
-CORS(app)
-
 # ================== Multimodal LLM ==================
 try:
     # Use deployment_name instead of engine, and ensure model matches
@@ -141,7 +169,7 @@ class VisionQueryEngine(CustomQueryEngine):
     def __init__(self, qa_prompt: Optional[PromptTemplate] = None, **kwargs):
         super().__init__(qa_prompt=qa_prompt or QA_PROMPT, **kwargs)
 
-    def custom_query(self, query_str: str) -> Response:
+    def custom_query(self, query_str: str) -> LlamaResponse:
         nodes = self.retriever.retrieve(query_str)
         
         # Build image nodes with page number references
@@ -185,7 +213,7 @@ class VisionQueryEngine(CustomQueryEngine):
                     ref_text += " [Image available]"
                 references.append(ref_text)
             
-            return Response(
+            return LlamaResponse(
                 response=str(response),
                 source_nodes=nodes,
                 metadata={
@@ -198,6 +226,73 @@ class VisionQueryEngine(CustomQueryEngine):
             logger.error(f"OpenAI API error: {str(e)}")
             logger.error(f"Deployment name used: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}")
             raise
+
+    def stream_query(self, query_str: str):
+        """Stream the response for real-time display"""
+        nodes = self.retriever.retrieve(query_str)
+        
+        # Build image nodes with page number references
+        image_nodes = []
+        for n in nodes:
+            blob_path = n.metadata.get("image_path")
+            if blob_path:
+                try:
+                    full_url = FrontendConfig.build_image_url(blob_path)
+                    img_node = ImageNode(image_url=full_url)
+                    img_node.metadata = {"page_num": n.metadata.get("page_num", "N/A")}
+                    image_nodes.append(NodeWithScore(node=img_node))
+                except Exception as e:
+                    logger.error(f"Image node error: {str(e)}")
+        
+        # Build the textual context (include page numbers)
+        context_str = "\n".join([
+            f"Page {n.metadata.get('page_num', '?')}: {n.get_content(metadata_mode=MetadataMode.LLM)}"
+            for n in nodes
+        ])
+        
+        formatted_prompt = self.qa_prompt.format(
+            context_str=context_str,
+            query_str=query_str
+        )
+        
+        # Stream the response
+        response_gen = self.multi_modal_llm.stream_complete(
+            prompt=formatted_prompt,
+            image_documents=[n.node for n in image_nodes],
+        )
+        
+        # Extract metadata for sources
+        pages = list({int(n.metadata.get("page_num", 0)) for n in nodes if n.metadata.get("page_num")})
+        
+        valid_images = []
+        for img in image_nodes:
+            img_url = img.node.image_url
+            if img_url and validate_image_url(img_url):
+                valid_images.append(img_url)
+            else:
+                logger.warning(f"Invalid image URL removed: {img_url}")
+
+        # Build source previews with validation
+        source_previews = []
+        for node in nodes:
+            image_path = node.metadata.get('image_path')
+            image_url = FrontendConfig.build_image_url(image_path) if image_path else None
+
+            if image_url and not validate_image_url(image_url):
+                image_url = None
+
+            source_previews.append({
+                'page': node.metadata.get('page_num', 'N/A'),
+                'content': node.get_content(metadata_mode=MetadataMode.LLM)[:250] + "...",
+                'imageUrl': image_url
+            })
+        
+        # Return generator with metadata
+        return response_gen, {
+            'pages': pages,
+            'images': valid_images,
+            'sourcePreviews': source_previews
+        }
 
 # ================== Initialize Query Engine ==================
 def initialize_engine():
@@ -342,6 +437,57 @@ def handle_chat():
         return jsonify({
             'error': str(e),
             'message': 'Failed to process your request. Please check your Azure OpenAI deployment names.'
+        }), 500
+
+@app.route('/api/chat/stream', methods=['GET', 'POST'])
+def handle_chat_stream():
+    """Process chat messages and return streaming response"""
+    try:
+        # Handle both GET and POST methods
+        if request.method == 'POST':
+            data = request.get_json()
+            query = data.get('message', '').strip()
+        else:
+            # GET method - used by EventSource
+            query = request.args.get('message', '').strip()
+        
+        if not query:
+            return jsonify({'error': 'Empty query received'}), 400
+        
+        def generate():
+            try:
+                response_gen, metadata = query_engine.stream_query(query)
+                
+                # Send metadata first
+                yield f"data: {json.dumps({'type': 'metadata', 'data': metadata})}\n\n"
+                
+                # Stream the response chunks
+                for chunk in response_gen:
+                    if chunk.delta:
+                        yield f"data: {json.dumps({'type': 'chunk', 'data': chunk.delta})}\n\n"
+                
+                # Send done signal
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                
+            except Exception as e:
+                logger.error(f"Streaming error: {str(e)}")
+                yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        
+        return Response(
+            stream_with_context(generate()),
+            mimetype='text/event-stream',
+            headers={
+                'Cache-Control': 'no-cache',
+                'X-Accel-Buffering': 'no',
+                'Connection': 'keep-alive',
+            }
+        )
+            
+    except Exception as e:
+        logger.error(f"Processing error: {str(e)}")
+        return jsonify({
+            'error': str(e),
+            'message': 'Failed to process your request.'
         }), 500
 
 @app.route('/api/health', methods=['GET'])
