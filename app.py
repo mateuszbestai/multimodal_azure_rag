@@ -73,11 +73,18 @@ def validate_env():
         'AZURE_SEARCH_SERVICE_ENDPOINT',
         'AZURE_SEARCH_ADMIN_KEY',
         'AZURE_STORAGE_ACCOUNT_NAME',
-        'AZURE_STORAGE_SAS_TOKEN'
+        'AZURE_STORAGE_SAS_TOKEN',
+        'AZURE_OPENAI_CHAT_COMPLETION_DEPLOYED_MODEL_NAME',
+        'AZURE_OPENAI_EMBEDDING_DEPLOYED_MODEL_NAME'
     ]
     missing = [var for var in required_vars if not os.getenv(var)]
     if missing:
         raise EnvironmentError(f"Missing required environment variables: {', '.join(missing)}")
+    
+    # Log the deployment names for debugging
+    logger.info(f"Azure OpenAI Endpoint: {FrontendConfig.AZURE_OPENAI_ENDPOINT}")
+    logger.info(f"Chat Deployment Name: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}")
+    logger.info(f"Embedding Deployment Name: {FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT}")
 
 validate_env()
 
@@ -86,14 +93,21 @@ app = Flask(__name__)
 CORS(app)
 
 # ================== Multimodal LLM ==================
-azure_openai_mm_llm = AzureOpenAIMultiModal(
-    engine=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
-    api_version="2024-08-01-preview",
-    model=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
-    max_new_tokens=4096,
-    api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
-    api_base=FrontendConfig.AZURE_OPENAI_ENDPOINT,
-)
+try:
+    # Use deployment_name instead of engine, and ensure model matches
+    azure_openai_mm_llm = AzureOpenAIMultiModal(
+        deployment_name=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,  # Changed from engine
+        api_version="2024-02-01",  # Use stable API version
+        model="gpt-4.1",  # Specify the actual model
+        max_new_tokens=4096,
+        api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
+        azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,  # Changed from api_base
+    )
+    logger.info("Successfully initialized AzureOpenAIMultiModal")
+except Exception as e:
+    logger.error(f"Failed to initialize AzureOpenAIMultiModal: {str(e)}")
+    logger.error("Please check your deployment name in Azure Portal")
+    raise
 
 # ================== Enhanced Prompt Template ==================
 QA_PROMPT_TMPL = """\
@@ -182,28 +196,35 @@ class VisionQueryEngine(CustomQueryEngine):
             )
         except Exception as e:
             logger.error(f"OpenAI API error: {str(e)}")
+            logger.error(f"Deployment name used: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}")
             raise
 
 # ================== Initialize Query Engine ==================
 def initialize_engine():
     """Initialize Azure components and query engine"""
     try:
+        # Test the deployment first
         llm = AzureOpenAI(
-            model=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
+            model="gpt-4.1",  # Specify the base model
             deployment_name=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
             api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
             azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,
-            api_version="2024-08-01-preview",
+            api_version="2024-02-01",  # Use stable API version
             streaming=True
         )
 
         embed_model = AzureOpenAIEmbedding(
-            model=FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+            model="text-embedding-ada-002",  # Specify the base model
             deployment_name=FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
             api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
             azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,
-            api_version="2024-08-01-preview",
+            api_version="2024-02-01",  # Use stable API version
         )
+
+        # Test the deployments
+        logger.info("Testing LLM deployment...")
+        test_response = llm.complete("Hello")
+        logger.info(f"LLM test successful: {test_response}")
 
         # Tie these to the global Settings (matching ingest.py)
         Settings.llm = llm
@@ -248,6 +269,8 @@ def initialize_engine():
         )
     except Exception as e:
         logger.error(f"Initialization error: {str(e)}")
+        logger.error(f"Current deployment names - Chat: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}, Embedding: {FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT}")
+        logger.error("Please verify these deployment names exist in your Azure OpenAI resource")
         raise
 
 query_engine = initialize_engine()
@@ -315,12 +338,23 @@ def handle_chat():
             
     except Exception as e:
         logger.error(f"Processing error: {str(e)}")
+        logger.error(f"Deployment being used: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}")
         return jsonify({
             'error': str(e),
-            'message': 'Failed to process your request. Please try again.'
+            'message': 'Failed to process your request. Please check your Azure OpenAI deployment names.'
         }), 500
 
-
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint with deployment info"""
+    return jsonify({
+        'status': 'healthy',
+        'deployments': {
+            'chat': FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
+            'embedding': FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+        },
+        'endpoint': FrontendConfig.AZURE_OPENAI_ENDPOINT
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)
