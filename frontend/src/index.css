@@ -2,6 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Base styles for smooth dark mode transitions */
+@layer base {
+  html {
+    @apply transition-colors duration-200;
+  }
+  
+  body {
+    @apply bg-gray-50 dark:bg-gray-900 text-gray-900 dark:text-gray-100;
+  }
+}
+
 /* Message transition animations */
 .message-enter {
   opacity: 0;
@@ -23,34 +34,128 @@
   transition: opacity 300ms ease-in-out;
 }
 
-/* Custom scrollbar */
+/* Custom scrollbar with dark mode support */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: transparent;
+  @apply bg-transparent;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 4px;
+  @apply bg-gray-300 dark:bg-gray-600 rounded;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+  @apply bg-gray-400 dark:bg-gray-500;
 }
 
-/* Focus styles */
+/* Focus styles with dark mode support */
 *:focus-visible {
-  outline: 2px solid #0ea5e9;
-  outline-offset: 2px;
+  @apply outline-2 outline-offset-2 outline-primary-500 dark:outline-primary-400;
 }
 
-/* Smooth transitions */
+/* Smooth transitions for interactive elements */
 .transition-all {
   transition-property: all;
   transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
   transition-duration: 150ms;
+}
+
+/* Streaming cursor animation */
+@keyframes pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}
+
+/* Prose styling for markdown content */
+.prose pre {
+  @apply bg-gray-100 dark:bg-gray-800 border border-gray-200 dark:border-gray-700;
+}
+
+.prose code {
+  @apply bg-gray-100 dark:bg-gray-800 text-gray-800 dark:text-gray-200 px-1 py-0.5 rounded text-sm;
+}
+
+.prose pre code {
+  @apply bg-transparent p-0;
+}
+
+/* Dark mode specific prose adjustments */
+.dark .prose-invert {
+  @apply text-gray-100;
+}
+
+.dark .prose-invert strong {
+  @apply text-gray-100;
+}
+
+.dark .prose-invert a {
+  @apply text-primary-400;
+}
+
+.dark .prose-invert code {
+  @apply bg-gray-700 text-gray-200;
+}
+
+/* Loading animation */
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-spin {
+  animation: spin 1s linear infinite;
+}
+
+/* Fade in animation */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+/* Slide in animation */
+@keyframes slideIn {
+  from {
+    transform: translateY(10px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
+.animate-slide-in {
+  animation: slideIn 0.3s ease-out;
+}
+
+/* Button hover effects */
+button {
+  @apply transition-all duration-150 ease-in-out;
+}
+
+/* Card hover effects */
+.hover-card {
+  @apply transition-all duration-200 ease-in-out;
+}
+
+/* Ensure smooth color transitions for theme switching */
+* {
+  @apply transition-colors duration-200;
 }

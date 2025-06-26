@@ -1,9 +1,9 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft } from 'lucide-react';
+import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft, Moon, Sun } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { tomorrow } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { tomorrow, oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { CSSTransition, TransitionGroup } from 'react-transition-group';
 
 interface Message {
@@ -16,6 +16,7 @@ interface Message {
     images?: string[];
   };
   loading?: boolean;
+  streaming?: boolean;
 }
 
 interface SourcePreview {
@@ -78,6 +79,12 @@ const ImageViewer: React.FC<ImageViewerProps> = ({ url, onClose }) => {
 };
 
 function App() {
+  // Dark mode state
+  const [darkMode, setDarkMode] = useState(() => {
+    const saved = localStorage.getItem('darkMode');
+    return saved ? JSON.parse(saved) : false;
+  });
+  
   // Chat history state
   const [chatSessions, setChatSessions] = useState<ChatSession[]>([]);
   const [activeChatId, setActiveChatId] = useState<string | null>(null);
@@ -95,6 +102,17 @@ function App() {
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const eventSourceRef = useRef<EventSource | null>(null);
+
+  // Apply dark mode class to document
+  useEffect(() => {
+    if (darkMode) {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
+    }
+    localStorage.setItem('darkMode', JSON.stringify(darkMode));
+  }, [darkMode]);
 
   // Load chat sessions from localStorage on initial render
   useEffect(() => {
@@ -152,6 +170,15 @@ function App() {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  // Cleanup EventSource on unmount
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
 
   const createNewChat = () => {
     const newChatId = crypto.randomUUID();
@@ -241,6 +268,7 @@ function App() {
       role: 'assistant',
       timestamp: new Date(),
       loading: true,
+      streaming: true,
     };
 
     const updatedMessages = [...messages, userMessage, assistantMessage];
@@ -250,62 +278,163 @@ function App() {
     setIsLoading(true);
 
     try {
-      const response = await fetch('http://localhost:5001/api/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: input }),
-      });
-
-      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-
-      const data = await response.json();
-
-      const finalMessages = updatedMessages.map(msg =>
-        msg.id === assistantMessage.id
-          ? {
-              ...msg,
-              content: data.response || 'No response could be generated',
-              loading: false,
-              sources: {
-                pages: data.sources?.pages || [],
-                images: data.sources?.images || [],
-              },
-            }
-          : msg
-      );
-
-      setMessages(finalMessages);
-
-      let updatedSourcePreviews = sourcePreviews;
-      if (data.sourcePreviews) {
-        updatedSourcePreviews = [
-          ...sourcePreviews,
-          ...data.sourcePreviews.map((preview: any) => ({
-            ...preview,
-            id: crypto.randomUUID(),
-          }))
-        ];
-        setSourcePreviews(updatedSourcePreviews);
+      // Close any existing EventSource
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
       }
 
-      // Update chat title based on first user message if it's a new chat
-      const activeChat = chatSessions.find(chat => chat.id === activeChatId);
-      if (activeChat && activeChat.messages.length === 0) {
-        // This is the first message in a new chat, use it to set a more descriptive title
-        const newTitle = userMessage.content.length > 30 
-          ? userMessage.content.substring(0, 30) + '...' 
-          : userMessage.content;
+      // Create new EventSource for streaming
+      const eventSource = new EventSource(`http://localhost:5001/api/chat/stream?message=${encodeURIComponent(input)}`);
+      eventSourceRef.current = eventSource;
+      
+      let accumulatedContent = '';
+      let metadata: any = null;
+
+      eventSource.onmessage = (event) => {
+        const data = JSON.parse(event.data);
         
-        setChatSessions(prev => 
-          prev.map(chat => 
-            chat.id === activeChatId 
-              ? { ...chat, title: newTitle } 
-              : chat
-          )
-        );
-      }
+        if (data.type === 'metadata') {
+          metadata = data.data;
+          
+          // Update source previews immediately
+          if (metadata.sourcePreviews) {
+            const newPreviews = metadata.sourcePreviews.map((preview: any) => ({
+              ...preview,
+              id: crypto.randomUUID(),
+            }));
+            const updatedPreviews = [...sourcePreviews, ...newPreviews];
+            setSourcePreviews(updatedPreviews);
+            updateChatSession(updatedMessages, updatedPreviews);
+          }
+        } else if (data.type === 'chunk') {
+          accumulatedContent += data.data;
+          
+          // Update the assistant message with accumulated content
+          const streamingMessages = updatedMessages.map(msg =>
+            msg.id === assistantMessage.id
+              ? {
+                  ...msg,
+                  content: accumulatedContent,
+                  loading: false,
+                  streaming: true,
+                }
+              : msg
+          );
+          setMessages(streamingMessages);
+        } else if (data.type === 'done') {
+          eventSource.close();
+          
+          // Finalize the message
+          const finalMessages = updatedMessages.map(msg =>
+            msg.id === assistantMessage.id
+              ? {
+                  ...msg,
+                  content: accumulatedContent || 'No response could be generated',
+                  loading: false,
+                  streaming: false,
+                  sources: metadata ? {
+                    pages: metadata.pages || [],
+                    images: metadata.images || [],
+                  } : undefined,
+                }
+              : msg
+          );
+          
+          setMessages(finalMessages);
+          setIsLoading(false);
+          
+          // Update chat title based on first user message if it's a new chat
+          const activeChat = chatSessions.find(chat => chat.id === activeChatId);
+          if (activeChat && activeChat.messages.length === 0) {
+            const newTitle = userMessage.content.length > 30 
+              ? userMessage.content.substring(0, 30) + '...' 
+              : userMessage.content;
+            
+            setChatSessions(prev => 
+              prev.map(chat => 
+                chat.id === activeChatId 
+                  ? { ...chat, title: newTitle } 
+                  : chat
+              )
+            );
+          }
+          
+          updateChatSession(finalMessages, sourcePreviews);
+        } else if (data.type === 'error') {
+          throw new Error(data.message);
+        }
+      };
 
-      updateChatSession(finalMessages, updatedSourcePreviews);
+      eventSource.onerror = (error) => {
+        console.error('EventSource error:', error);
+        eventSource.close();
+        
+        const errorMessages = updatedMessages.map(msg =>
+          msg.id === assistantMessage.id
+            ? {
+                ...msg,
+                content: 'Sorry, an error occurred while processing your request.',
+                loading: false,
+                streaming: false,
+              }
+            : msg
+        );
+        
+        setMessages(errorMessages);
+        updateChatSession(errorMessages, sourcePreviews);
+        setIsLoading(false);
+      };
+
+      // Use the old non-streaming endpoint as fallback if needed
+      eventSource.addEventListener('error', async () => {
+        if (eventSource.readyState === EventSource.CLOSED && accumulatedContent === '') {
+          // Fallback to non-streaming endpoint
+          try {
+            const response = await fetch('http://localhost:5001/api/chat', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ message: input }),
+            });
+
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+
+            const data = await response.json();
+
+            const finalMessages = updatedMessages.map(msg =>
+              msg.id === assistantMessage.id
+                ? {
+                    ...msg,
+                    content: data.response || 'No response could be generated',
+                    loading: false,
+                    streaming: false,
+                    sources: {
+                      pages: data.sources?.pages || [],
+                      images: data.sources?.images || [],
+                    },
+                  }
+                : msg
+            );
+
+            setMessages(finalMessages);
+
+            let updatedSourcePreviews = sourcePreviews;
+            if (data.sourcePreviews) {
+              updatedSourcePreviews = [
+                ...sourcePreviews,
+                ...data.sourcePreviews.map((preview: any) => ({
+                  ...preview,
+                  id: crypto.randomUUID(),
+                }))
+              ];
+              setSourcePreviews(updatedSourcePreviews);
+            }
+
+            updateChatSession(finalMessages, updatedSourcePreviews);
+          } catch (error) {
+            console.error('Fallback API request failed:', error);
+          }
+        }
+      });
 
     } catch (error) {
       console.error('API request failed:', error);
@@ -315,6 +444,7 @@ function App() {
               ...msg,
               content: 'Sorry, an error occurred while processing your request.',
               loading: false,
+              streaming: false,
             }
           : msg
       );
@@ -384,15 +514,15 @@ function App() {
     : null;
 
   return (
-    <div className="flex h-screen bg-gray-50">
+    <div className="flex h-screen bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
       {/* Chat History Sidebar */}
       <div 
-        className={`w-72 bg-gray-900 transform transition-transform duration-300 ease-in-out ${
+        className={`w-72 bg-gray-900 dark:bg-gray-950 transform transition-transform duration-300 ease-in-out ${
           showChatSidebar ? 'translate-x-0' : '-translate-x-full'
         } absolute md:relative z-20 h-full overflow-hidden shadow-lg md:shadow-none`}
       >
         <div className="flex flex-col h-full">
-          <div className="p-4 border-b border-gray-800">
+          <div className="p-4 border-b border-gray-800 dark:border-gray-700">
             <button 
               onClick={createNewChat}
               className="w-full flex items-center justify-center gap-2 bg-primary-600 hover:bg-primary-700 text-white py-2 px-4 rounded-lg transition-colors"
@@ -404,15 +534,15 @@ function App() {
           
           <div className="flex-1 overflow-y-auto">
             <div className="p-2">
-              <h2 className="text-gray-400 text-xs uppercase font-semibold mb-2 px-2">Chat History</h2>
+              <h2 className="text-gray-400 dark:text-gray-500 text-xs uppercase font-semibold mb-2 px-2">Chat History</h2>
               <div className="space-y-1">
                 {chatSessions.map(chat => (
                   <div 
                     key={chat.id}
                     className={`group flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors ${
                       chat.id === activeChatId 
-                        ? 'bg-gray-800 text-white' 
-                        : 'text-gray-300 hover:bg-gray-800/70'
+                        ? 'bg-gray-800 dark:bg-gray-700 text-white' 
+                        : 'text-gray-300 hover:bg-gray-800/70 dark:hover:bg-gray-700/70'
                     }`}
                     onClick={() => setActiveChatId(chat.id)}
                   >
@@ -446,7 +576,7 @@ function App() {
             </div>
           </div>
           
-          <div className="p-4 border-t border-gray-800 text-gray-400 text-xs">
+          <div className="p-4 border-t border-gray-800 dark:border-gray-700 text-gray-400 dark:text-gray-500 text-xs">
             <p>Your chats are stored locally in this browser</p>
           </div>
         </div>
@@ -463,7 +593,7 @@ function App() {
       {/* Main Chat Area */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
-        <header className="bg-white border-b border-gray-200 px-6 py-4 shadow-sm">
+        <header className="bg-white dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-6 py-4 shadow-sm transition-colors duration-200">
           <div className="max-w-4xl mx-auto flex justify-between items-center">
             {isEditingTitle && activeChat ? (
               <div className="flex items-center gap-2">
@@ -471,18 +601,18 @@ function App() {
                   type="text"
                   value={editTitle}
                   onChange={(e) => setEditTitle(e.target.value)}
-                  className="text-lg border-b border-gray-300 focus:outline-none focus:border-primary-500 font-medium"
+                  className="text-lg border-b border-gray-300 dark:border-gray-600 bg-transparent text-gray-800 dark:text-gray-200 focus:outline-none focus:border-primary-500 font-medium"
                   autoFocus
                 />
                 <button 
                   onClick={saveTitle}
-                  className="p-1 text-gray-600 hover:text-primary-600"
+                  className="p-1 text-gray-600 dark:text-gray-400 hover:text-primary-600 dark:hover:text-primary-400"
                 >
                   <Save size={18} />
                 </button>
               </div>
             ) : (
-              <h1 className="text-xl font-semibold text-gray-800 flex items-center gap-2">
+              <h1 className="text-xl font-semibold text-gray-800 dark:text-gray-200 flex items-center gap-2">
                 {activeChat ? (
                   <>
                     <div className="w-8 h-8 bg-primary-600 rounded-full flex items-center justify-center">
@@ -493,7 +623,7 @@ function App() {
                     </span>
                     <button 
                       onClick={() => startTitleEdit(activeChat.id)}
-                      className="p-1 text-gray-400 hover:text-gray-600"
+                      className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300"
                     >
                       <Edit2 size={16} />
                     </button>
@@ -510,15 +640,22 @@ function App() {
             )}
             <div className="flex items-center gap-3">
               <button
+                onClick={() => setDarkMode(!darkMode)}
+                className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
+                title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+              >
+                {darkMode ? <Sun size={16} /> : <Moon size={16} />}
+              </button>
+              <button
                 onClick={exportChat}
-                className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 hover:text-gray-800 hover:bg-gray-100 rounded-md transition-colors"
+                className="flex items-center gap-2 px-3 py-1.5 text-sm text-gray-600 dark:text-gray-400 hover:text-gray-800 dark:hover:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-700 rounded-md transition-colors"
               >
                 <Download size={16} />
                 Export
               </button>
               <button
                 onClick={clearChat}
-                className="flex items-center gap-2 px-3 py-1.5 text-sm text-red-600 hover:text-red-800 hover:bg-red-50 rounded-md transition-colors"
+                className="flex items-center gap-2 px-3 py-1.5 text-sm text-red-600 dark:text-red-400 hover:text-red-800 dark:hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-md transition-colors"
               >
                 <X size={16} />
                 Clear
@@ -528,16 +665,16 @@ function App() {
         </header>
 
         {/* Messages */}
-        <div className="flex-1 overflow-y-auto px-6 py-6">
+        <div className="flex-1 overflow-y-auto px-6 py-6 bg-gray-50 dark:bg-gray-900 transition-colors duration-200">
           <div className="max-w-4xl mx-auto">
             {messages.length === 0 ? (
               <div className="flex items-center justify-center h-full">
                 <div className="text-center">
-                  <div className="w-16 h-16 bg-primary-100 rounded-full flex items-center justify-center mx-auto mb-4">
-                    <MessageSquare size={28} className="text-primary-600" />
+                  <div className="w-16 h-16 bg-primary-100 dark:bg-primary-900/30 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <MessageSquare size={28} className="text-primary-600 dark:text-primary-400" />
                   </div>
-                  <h2 className="text-2xl font-semibold text-gray-800 mb-2">Start a new conversation</h2>
-                  <p className="text-gray-500 mb-6 max-w-md">
+                  <h2 className="text-2xl font-semibold text-gray-800 dark:text-gray-200 mb-2">Start a new conversation</h2>
+                  <p className="text-gray-500 dark:text-gray-400 mb-6 max-w-md">
                     Ask any question about the documents in your knowledge base.
                   </p>
                 </div>
@@ -560,8 +697,8 @@ function App() {
                         className={`max-w-[80%] rounded-lg p-4 ${
                           message.role === 'user'
                             ? 'bg-primary-600 text-white'
-                            : 'bg-white shadow-sm border border-gray-200'
-                        }`}
+                            : 'bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700'
+                        } transition-colors duration-200`}
                       >
                         {message.loading ? (
                           <div className="flex items-center gap-2">
@@ -571,7 +708,7 @@ function App() {
                         ) : (
                           <div className="space-y-2">
                             <div className={`prose prose-sm max-w-none ${
-                              message.role === 'user' ? 'prose-invert' : ''
+                              message.role === 'user' ? 'prose-invert' : 'dark:prose-invert'
                             }`}>
                               <ReactMarkdown
                                 components={{
@@ -579,7 +716,7 @@ function App() {
                                     const match = /language-(\w+)/.exec(className || '');
                                     return !inline && match ? (
                                       <SyntaxHighlighter
-                                        style={tomorrow}
+                                        style={darkMode ? oneDark : tomorrow}
                                         language={match[1]}
                                         PreTag="div"
                                         {...props}
@@ -597,11 +734,14 @@ function App() {
                                 {message.content}
                               </ReactMarkdown>
                             </div>
+                            {message.streaming && (
+                              <span className="inline-block w-1 h-4 bg-gray-400 dark:bg-gray-500 animate-pulse ml-1"></span>
+                            )}
                             <div className="flex items-center justify-between mt-2 text-sm">
                               <span className={`${
                                 message.role === 'user'
                                   ? 'text-primary-100'
-                                  : 'text-gray-400'
+                                  : 'text-gray-400 dark:text-gray-500'
                               }`}>
                                 {formatDistanceToNow(message.timestamp, { addSuffix: true })}
                               </span>
@@ -610,7 +750,7 @@ function App() {
                                 className={`p-1 ${
                                   message.role === 'user'
                                     ? 'text-primary-100 hover:text-white'
-                                    : 'text-gray-400 hover:text-gray-600'
+                                    : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
                                 } transition-colors`}
                                 title="Copy message"
                               >
@@ -621,8 +761,8 @@ function App() {
                         )}
                       </div>
                       {message.role === 'user' && (
-                        <div className="w-8 h-8 rounded-full bg-gray-200 flex items-center justify-center ml-3 mt-1">
-                          <span className="text-gray-600 text-sm font-semibold">U</span>
+                        <div className="w-8 h-8 rounded-full bg-gray-200 dark:bg-gray-700 flex items-center justify-center ml-3 mt-1">
+                          <span className="text-gray-600 dark:text-gray-300 text-sm font-semibold">U</span>
                         </div>
                       )}
                     </div>
@@ -635,7 +775,7 @@ function App() {
         </div>
 
         {/* Input Form */}
-        <div className="bg-white border-t border-gray-200 px-6 py-4">
+        <div className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 px-6 py-4 transition-colors duration-200">
           <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
             <div className="flex gap-4">
               <input
@@ -643,7 +783,7 @@ function App() {
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 placeholder="Ask a question..."
-                className="flex-1 rounded-lg border border-gray-300 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50"
+                className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50 transition-colors duration-200"
                 disabled={isLoading}
               />
               <div className="flex gap-2">
@@ -667,17 +807,17 @@ function App() {
 
       {/* References Sidebar */}
       <div
-        className={`w-96 bg-white border-l border-gray-200 transform transition-transform duration-300 ease-in-out ${
+        className={`w-96 bg-white dark:bg-gray-800 border-l border-gray-200 dark:border-gray-700 transform transition-all duration-300 ease-in-out ${
           showReferences ? 'translate-x-0' : 'translate-x-full'
         }`}
       >
         <div className="h-full flex flex-col">
-          <div className="p-4 border-b border-gray-200">
+          <div className="p-4 border-b border-gray-200 dark:border-gray-700">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-800">References</h2>
+              <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">References</h2>
               <button
                 onClick={() => setShowReferences(false)}
-                className="p-1 text-gray-400 hover:text-gray-600 transition-colors"
+                className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
               >
                 <X size={20} />
               </button>
@@ -688,9 +828,9 @@ function App() {
                 placeholder="Search references..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
-                className="w-full px-4 py-2 pr-10 rounded-lg border border-gray-300 focus:outline-none focus:ring-2 focus:ring-primary-500"
+                className="w-full px-4 py-2 pr-10 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-primary-500 transition-colors duration-200"
               />
-              <Search className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400" size={18} />
+              <Search className="absolute right-3 top-1/2 transform -translate-y-1/2 text-gray-400 dark:text-gray-500" size={18} />
             </div>
             {categories.length > 0 && (
               <div className="mt-4 flex flex-wrap gap-2">
@@ -700,8 +840,8 @@ function App() {
                     onClick={() => setCategoryFilter(categoryFilter === category ? null : category || null)}
                     className={`px-3 py-1 rounded-full text-sm ${
                       categoryFilter === category
-                        ? 'bg-primary-100 text-primary-800'
-                        : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                        ? 'bg-primary-100 dark:bg-primary-900/30 text-primary-800 dark:text-primary-200'
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-gray-200 dark:hover:bg-gray-600'
                     } transition-colors`}
                   >
                     {category}
@@ -715,12 +855,12 @@ function App() {
               {filteredSourcePreviews.map((preview) => (
                 <div
                   key={preview.id}
-                  className="bg-white rounded-lg border border-gray-200 p-4 hover:border-primary-300 transition-colors"
+                  className="bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 p-4 hover:border-primary-300 dark:hover:border-primary-600 transition-all duration-200"
                 >
                   {preview.title && (
-                    <h3 className="font-medium text-gray-900 mb-1">{preview.title}</h3>
+                    <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1">{preview.title}</h3>
                   )}
-                  <div className="flex items-center gap-2 text-sm text-gray-500 mb-2">
+                  <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 mb-2">
                     <span>Page {preview.page}</span>
                     {preview.date && (
                       <>
@@ -729,9 +869,9 @@ function App() {
                       </>
                     )}
                   </div>
-                  <p className="text-sm text-gray-600 mb-4">{preview.content}</p>
+                  <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">{preview.content}</p>
                   {preview.imageUrl && (
-                    <div className="relative aspect-video bg-gray-50 rounded-md overflow-hidden group">
+                    <div className="relative aspect-video bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden group">
                       <img
                         src={preview.imageUrl}
                         alt={preview.title || `Preview from page ${preview.page}`}
@@ -767,14 +907,14 @@ function App() {
       {/* References Toggle */}
       <button
         onClick={() => setShowReferences(!showReferences)}
-        className={`fixed right-0 top-1/2 transform -translate-y-1/2 bg-white border border-gray-200 rounded-l-lg p-2 shadow-md transition-transform ${
+        className={`fixed right-0 top-1/2 transform -translate-y-1/2 bg-white dark:bg-gray-800 border border-gray-200 dark:border-gray-700 rounded-l-lg p-2 shadow-md transition-all duration-200 ${
           showReferences ? 'translate-x-96' : ''
         }`}
       >
         {showReferences ? (
-          <ChevronRight className="text-gray-600" size={20} />
+          <ChevronRight className="text-gray-600 dark:text-gray-400" size={20} />
         ) : (
-          <ChevronLeft className="text-gray-600" size={20} />
+          <ChevronLeft className="text-gray-600 dark:text-gray-400" size={20} />
         )}
       </button>
 
