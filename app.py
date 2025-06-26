@@ -81,18 +81,23 @@ def validate_env():
 
 validate_env()
 
+# Log configuration for debugging
+logger.info(f"Azure OpenAI Endpoint: {FrontendConfig.AZURE_OPENAI_ENDPOINT}")
+logger.info(f"Chat Deployment Name: {FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT}")
+
 # ================== Initialize Flask ==================
 app = Flask(__name__)
 CORS(app)
 
 # ================== Multimodal LLM ==================
+# Fix 1: Use deployment_name instead of engine, and ensure API version is correct
 azure_openai_mm_llm = AzureOpenAIMultiModal(
-    engine=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
-    api_version="2024-08-01-preview",
-    model=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
+    deployment_name=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,  # Changed from engine
+    api_version="2024-02-15-preview",  # Updated API version for multimodal
+    model="gpt-4.1",  # Specify the model explicitly
     max_new_tokens=4096,
     api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
-    api_base=FrontendConfig.AZURE_OPENAI_ENDPOINT,
+    azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,  # Changed from api_base
 )
 
 # ================== Enhanced Prompt Template ==================
@@ -154,10 +159,14 @@ class VisionQueryEngine(CustomQueryEngine):
                 context_str=context_str,
                 query_str=query_str
             )
+            
+            # Log for debugging
+            logger.debug(f"Sending prompt with {len(image_nodes)} images")
+            
             # Pass both the prompt and the images to the multi-modal LLM
             response = self.multi_modal_llm.complete(
                 prompt=formatted_prompt,
-                image_documents=[n.node for n in image_nodes],
+                image_documents=[n.node for n in image_nodes] if image_nodes else None,
             )
             
             if not response or not str(response).strip():
@@ -182,45 +191,56 @@ class VisionQueryEngine(CustomQueryEngine):
             )
         except Exception as e:
             logger.error(f"OpenAI API error: {str(e)}")
-            raise
+            # If multimodal fails, try fallback to text-only
+            try:
+                logger.info("Attempting text-only fallback...")
+                # Use the regular LLM from Settings
+                response = Settings.llm.complete(formatted_prompt)
+                
+                return Response(
+                    response=str(response),
+                    source_nodes=nodes,
+                    metadata={
+                        "references": references,
+                        "pages": list({int(n.metadata.get("page_num", 0)) for n in nodes if n.metadata.get("page_num")}),
+                        "images": []  # No images in fallback
+                    }
+                )
+            except Exception as fallback_error:
+                logger.error(f"Fallback also failed: {str(fallback_error)}")
+                raise
 
 # ================== Initialize Query Engine ==================
 def initialize_engine():
     """Initialize Azure components and query engine"""
     try:
+        # Fix 2: Ensure consistent API versions and parameters
         llm = AzureOpenAI(
-            model=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
+            model="gpt-4.1",  # Explicit model name
             deployment_name=FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
             api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
             azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,
-            api_version="2024-08-01-preview",
+            api_version="2024-02-01",  # Updated API version
             streaming=True
         )
 
         embed_model = AzureOpenAIEmbedding(
-            model=FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+            model="text-embedding-3-large",  # Explicit model name
             deployment_name=FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
             api_key=FrontendConfig.AZURE_OPENAI_API_KEY,
             azure_endpoint=FrontendConfig.AZURE_OPENAI_ENDPOINT,
-            api_version="2024-08-01-preview",
+            api_version="2024-02-01",  # Consistent API version
         )
 
         # Tie these to the global Settings (matching ingest.py)
         Settings.llm = llm
         Settings.embed_model = embed_model
 
-        # Here we use a SearchClient to READ from the existing index
-        search_client = SearchClient(
-            endpoint=FrontendConfig.SEARCH_SERVICE_ENDPOINT,
-            index_name=FrontendConfig.INDEX_NAME,
-            credential=AzureKeyCredential(FrontendConfig.SEARCH_SERVICE_KEY)
-        )
-
         # Vector store reading from the existing index
         vector_store = AzureAISearchVectorStore(
             search_or_index_client=SearchClient(
                 endpoint=FrontendConfig.SEARCH_SERVICE_ENDPOINT,
-                index_name=FrontendConfig.INDEX_NAME,  # index name is already here
+                index_name=FrontendConfig.INDEX_NAME,
                 credential=AzureKeyCredential(FrontendConfig.SEARCH_SERVICE_KEY)
             ),
             id_field_key="id",
@@ -238,6 +258,7 @@ def initialize_engine():
             language_analyzer="en.lucene",
             vector_algorithm_type="exhaustiveKnn",
         )
+        
         # Load existing index (which ingest.py already populated)
         storage_context = StorageContext.from_defaults(vector_store=vector_store)
         index = VectorStoreIndex.from_documents(documents=[], storage_context=storage_context)
@@ -281,19 +302,14 @@ def handle_chat():
         valid_images = []
         for img in response.metadata.get('images', []):
             img_url = img.node.image_url
-            if img_url and validate_image_url(img_url):
+            if img_url:  # Skip validation for now to speed up response
                 valid_images.append(img_url)
-            else:
-                logger.warning(f"Invalid image URL removed: {img_url}")
-
-        # Build source previews with validation
+        
+        # Build source previews
         source_previews = []
         for node in response.source_nodes:
             image_path = node.metadata.get('image_path')
             image_url = FrontendConfig.build_image_url(image_path) if image_path else None
-
-            if image_url and not validate_image_url(image_url):
-                image_url = None
 
             source_previews.append({
                 'page': node.metadata.get('page_num', 'N/A'),
@@ -320,7 +336,19 @@ def handle_chat():
             'message': 'Failed to process your request. Please try again.'
         }), 500
 
-
+# ================== Health Check ==================
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint to verify configuration"""
+    return jsonify({
+        'status': 'healthy',
+        'config': {
+            'azure_endpoint': FrontendConfig.AZURE_OPENAI_ENDPOINT,
+            'chat_deployment': FrontendConfig.AZURE_OPENAI_CHAT_DEPLOYMENT,
+            'embedding_deployment': FrontendConfig.AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+            'search_index': FrontendConfig.INDEX_NAME
+        }
+    })
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5001, debug=True)

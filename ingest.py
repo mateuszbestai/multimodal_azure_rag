@@ -52,7 +52,7 @@ SEARCH_SERVICE_API_KEY = os.getenv("AZURE_SEARCH_ADMIN_KEY")
 AZURE_DOC_INTELLIGENCE_ENDPOINT = os.getenv("AZURE_DOC_INTELLIGENCE_ENDPOINT")
 AZURE_DOC_INTELLIGENCE_KEY = os.getenv("AZURE_DOC_INTELLIGENCE_KEY")
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
-BLOB_CONTAINER_NAME = "rag-demo-images"
+BLOB_CONTAINER_NAME = "rag-test"
 INDEX_NAME = "azure-multimodal-search"
 DOWNLOAD_PATH = "pdf-files"
 
@@ -296,7 +296,7 @@ async def process_document(pdf_path: str) -> RetrieverQueryEngine:
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    pdf_path = "data/pdfs/new-relic-2024-observability-forecast-report.pdf"
+    pdf_path = "pdf-files\How We Built Qualtrics AI to Be Secure and Private_for BAT Custoer.pdf"
     
     try:
         query_engine = asyncio.run(process_document(pdf_path))
