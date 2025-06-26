@@ -157,14 +157,23 @@ function App() {
 
   // Set current chat data when active chat changes
   useEffect(() => {
-    if (activeChatId) {
+    const activeChat = chatSessions.find(chat => chat.id === activeChatId);
+    if (activeChat) {
+      setMessages(activeChat.messages);
+      setSourcePreviews(activeChat.sourcePreviews);
+    }
+  }, [activeChatId]); // Only run when switching chats
+
+  // Keep chat sessions in sync without resetting current state
+  useEffect(() => {
+    if (activeChatId && messages.length > 0) {
       const activeChat = chatSessions.find(chat => chat.id === activeChatId);
-      if (activeChat) {
+      if (activeChat && activeChat.messages.length !== messages.length) {
+        // Chat was updated externally, don't reset sourcePreviews
         setMessages(activeChat.messages);
-        setSourcePreviews(activeChat.sourcePreviews);
       }
     }
-  }, [activeChatId, chatSessions]);
+  }, [chatSessions]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
