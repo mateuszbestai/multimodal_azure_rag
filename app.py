@@ -71,7 +71,7 @@ class FrontendConfig:
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYED_MODEL_NAME")
     SEARCH_SERVICE_ENDPOINT = os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT")
     SEARCH_SERVICE_KEY = os.getenv("AZURE_SEARCH_ADMIN_KEY")
-    INDEX_NAME = "azure-multimodal-search"  # Matches ingest.py
+    INDEX_NAME = "azure-multimodal-search-new"  # Matches ingest.py
     BLOB_CONTAINER = os.getenv("BLOB_CONTAINER_NAME", "rag-demo-images")
     STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     SAS_TOKEN = os.getenv("AZURE_STORAGE_SAS_TOKEN")
