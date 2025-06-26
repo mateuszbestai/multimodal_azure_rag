@@ -104,7 +104,9 @@ def create_folder_structure(base_path: str, pdf_path: str) -> str:
 def pdf_to_images(pdf_path: str, output_base: str) -> List[dict]:
     """Convert PDF to images with enhanced error handling."""
     image_dicts = []
-    folder_path = create_folder_structure(output_base, pdf_path)
+    folder_name = Path(pdf_path).stem  # e.g., "How We Built Qualtrics AI to Be Secure and Private_for BAT Custoer"
+    folder_path = Path(output_base) / folder_name
+    folder_path.mkdir(parents=True, exist_ok=True)
     
     try:
         doc = fitz.open(pdf_path)
@@ -116,8 +118,9 @@ def pdf_to_images(pdf_path: str, output_base: str) -> List[dict]:
             try:
                 page = doc.load_page(page_num)
                 pix = page.get_pixmap(dpi=150, colorspace=fitz.csRGB, alpha=False)
-                image_name = f"page_{page_num+1}.png"
-                image_path = str(Path(folder_path) / image_name)
+                # Use unique image name: folder_name_page_X.png
+                image_name = f"{folder_name}_page_{page_num+1}.png"
+                image_path = str(folder_path / image_name)
                 
                 pix.save(image_path)
                 
@@ -191,9 +194,10 @@ async def upload_single_image(image: dict, semaphore: asyncio.Semaphore) -> Opti
 def create_search_nodes(document_data: dict, image_urls: Dict[str, str]) -> List[TextNode]:
     """Create search nodes with linked text and images."""
     nodes = []
+    # Map page numbers to unique image URLs using page_num from image_dicts
     page_image_map = {
-        int(re.search(r"page_(\d+)", name).group(1)): url
-        for name, url in image_urls.items()
+        img["page_num"]: image_urls[img["name"]]
+        for img in document_data["images"] if img["name"] in image_urls
     }
 
     for page_num, page_text in enumerate(document_data["pages"], start=1):

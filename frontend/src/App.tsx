@@ -1,23 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { Send, Loader2, Copy, Download, Image as ImageIcon, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft, Moon, Sun } from 'lucide-react';
+import { Send, Loader2, Copy, Download, Image, Search, X, ChevronRight, ChevronLeft, Maximize2, ZoomIn, ZoomOut, Plus, Trash2, MessageSquare, Edit2, Save, MoreHorizontal, ArrowLeft, Moon, Sun } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import { formatDistanceToNow } from 'date-fns';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { tomorrow, oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { CSSTransition, TransitionGroup } from 'react-transition-group';
-
-interface Message {
-  id: string;
-  content: string;
-  role: 'user' | 'assistant' | 'system';
-  timestamp: Date;
-  sources?: {
-    pages: number[];
-    images?: string[];
-  };
-  loading?: boolean;
-  streaming?: boolean;
-}
 
 interface SourcePreview {
   id: string;
@@ -29,13 +16,26 @@ interface SourcePreview {
   date?: Date;
 }
 
+interface Message {
+  id: string;
+  content: string;
+  role: 'user' | 'assistant' | 'system';
+  timestamp: Date;
+  sources?: {
+    pages: number[];
+    images?: string[];
+  };
+  sourcePreviews?: SourcePreview[]; // Associate previews with each message
+  loading?: boolean;
+  streaming?: boolean;
+}
+
 interface ChatSession {
   id: string;
   title: string;
   createdAt: Date;
   updatedAt: Date;
   messages: Message[];
-  sourcePreviews: SourcePreview[];
 }
 
 interface ImageViewerProps {
@@ -96,11 +96,12 @@ function App() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState('');
   const [isLoading, setIsLoading] = useState(false);
-  const [sourcePreviews, setSourcePreviews] = useState<SourcePreview[]>([]);
+  const [currentSourcePreviews, setCurrentSourcePreviews] = useState<SourcePreview[]>([]);
   const [showReferences, setShowReferences] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedImage, setSelectedImage] = useState<string | null>(null);
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const [selectedMessageId, setSelectedMessageId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const eventSourceRef = useRef<EventSource | null>(null);
 
@@ -121,7 +122,7 @@ function App() {
       try {
         const parsedSessions = JSON.parse(savedSessions, (key, value) => {
           // Convert string dates back to Date objects
-          if (key === 'timestamp' || key === 'createdAt' || key === 'updatedAt') {
+          if (key === 'timestamp' || key === 'createdAt' || key === 'updatedAt' || key === 'date') {
             return new Date(value);
           }
           return value;
@@ -135,7 +136,15 @@ function App() {
           )[0];
           setActiveChatId(mostRecentChat.id);
           setMessages(mostRecentChat.messages);
-          setSourcePreviews(mostRecentChat.sourcePreviews);
+          
+          // Set source previews from the last assistant message
+          const lastAssistantMessage = mostRecentChat.messages
+            .filter(msg => msg.role === 'assistant' && msg.sourcePreviews)
+            .pop();
+          if (lastAssistantMessage?.sourcePreviews) {
+            setCurrentSourcePreviews(lastAssistantMessage.sourcePreviews);
+            setSelectedMessageId(lastAssistantMessage.id);
+          }
         } else {
           createNewChat();
         }
@@ -160,20 +169,21 @@ function App() {
     const activeChat = chatSessions.find(chat => chat.id === activeChatId);
     if (activeChat) {
       setMessages(activeChat.messages);
-      setSourcePreviews(activeChat.sourcePreviews);
-    }
-  }, [activeChatId]); // Only run when switching chats
-
-  // Keep chat sessions in sync without resetting current state
-  useEffect(() => {
-    if (activeChatId && messages.length > 0) {
-      const activeChat = chatSessions.find(chat => chat.id === activeChatId);
-      if (activeChat && activeChat.messages.length !== messages.length) {
-        // Chat was updated externally, don't reset sourcePreviews
-        setMessages(activeChat.messages);
+      
+      // Find the last assistant message with source previews
+      const lastAssistantMessage = activeChat.messages
+        .filter(msg => msg.role === 'assistant' && msg.sourcePreviews)
+        .pop();
+      
+      if (lastAssistantMessage?.sourcePreviews) {
+        setCurrentSourcePreviews(lastAssistantMessage.sourcePreviews);
+        setSelectedMessageId(lastAssistantMessage.id);
+      } else {
+        setCurrentSourcePreviews([]);
+        setSelectedMessageId(null);
       }
     }
-  }, [chatSessions]);
+  }, [activeChatId, chatSessions]);
 
   // Scroll to bottom when messages change
   useEffect(() => {
@@ -189,6 +199,15 @@ function App() {
     };
   }, []);
 
+  // Update source previews when a message is selected
+  const handleMessageClick = (message: Message) => {
+    if (message.role === 'assistant' && message.sourcePreviews) {
+      setCurrentSourcePreviews(message.sourcePreviews);
+      setSelectedMessageId(message.id);
+      setShowReferences(true);
+    }
+  };
+
   const createNewChat = () => {
     const newChatId = crypto.randomUUID();
     const newChat: ChatSession = {
@@ -196,14 +215,14 @@ function App() {
       title: `New Chat ${new Date().toLocaleDateString()}`,
       createdAt: new Date(),
       updatedAt: new Date(),
-      messages: [],
-      sourcePreviews: []
+      messages: []
     };
     
     setChatSessions(prev => [newChat, ...prev]);
     setActiveChatId(newChatId);
     setMessages([]);
-    setSourcePreviews([]);
+    setCurrentSourcePreviews([]);
+    setSelectedMessageId(null);
     setInput('');
   };
 
@@ -213,9 +232,21 @@ function App() {
     if (chatId === activeChatId) {
       const remainingChats = chatSessions.filter(chat => chat.id !== chatId);
       if (remainingChats.length > 0) {
-        setActiveChatId(remainingChats[0].id);
-        setMessages(remainingChats[0].messages);
-        setSourcePreviews(remainingChats[0].sourcePreviews);
+        const nextChat = remainingChats[0];
+        setActiveChatId(nextChat.id);
+        setMessages(nextChat.messages);
+        
+        // Load source previews from the last assistant message
+        const lastAssistantMessage = nextChat.messages
+          .filter(msg => msg.role === 'assistant' && msg.sourcePreviews)
+          .pop();
+        if (lastAssistantMessage?.sourcePreviews) {
+          setCurrentSourcePreviews(lastAssistantMessage.sourcePreviews);
+          setSelectedMessageId(lastAssistantMessage.id);
+        } else {
+          setCurrentSourcePreviews([]);
+          setSelectedMessageId(null);
+        }
       } else {
         createNewChat();
       }
@@ -243,15 +274,14 @@ function App() {
     }
   };
 
-  const updateChatSession = (newMessages: Message[], newSourcePreviews: SourcePreview[]) => {
+  const updateChatSession = (newMessages: Message[]) => {
     if (activeChatId) {
       setChatSessions(prev => 
         prev.map(chat => 
           chat.id === activeChatId 
             ? { 
                 ...chat, 
-                messages: newMessages, 
-                sourcePreviews: newSourcePreviews,
+                messages: newMessages,
                 updatedAt: new Date()
               } 
             : chat
@@ -260,7 +290,7 @@ function App() {
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.MouseEvent | React.KeyboardEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading || !activeChatId) return;
 
@@ -282,7 +312,7 @@ function App() {
 
     const updatedMessages = [...messages, userMessage, assistantMessage];
     setMessages(updatedMessages);
-    updateChatSession(updatedMessages, sourcePreviews);
+    updateChatSession(updatedMessages);
     setInput('');
     setIsLoading(true);
 
@@ -305,15 +335,17 @@ function App() {
         if (data.type === 'metadata') {
           metadata = data.data;
           
-          // Update source previews immediately
+          // Process source previews for this specific message
           if (metadata.sourcePreviews) {
             const newPreviews = metadata.sourcePreviews.map((preview: any) => ({
               ...preview,
               id: crypto.randomUUID(),
             }));
-            const updatedPreviews = [...sourcePreviews, ...newPreviews];
-            setSourcePreviews(updatedPreviews);
-            updateChatSession(updatedMessages, updatedPreviews);
+            
+            // Update current display if this is the selected message
+            setCurrentSourcePreviews(newPreviews);
+            setSelectedMessageId(assistantMessage.id);
+            setShowReferences(true);
           }
         } else if (data.type === 'chunk') {
           accumulatedContent += data.data;
@@ -333,7 +365,12 @@ function App() {
         } else if (data.type === 'done') {
           eventSource.close();
           
-          // Finalize the message
+          // Finalize the message with its source previews
+          const sourcePreviews = metadata?.sourcePreviews?.map((preview: any) => ({
+            ...preview,
+            id: crypto.randomUUID(),
+          })) || [];
+          
           const finalMessages = updatedMessages.map(msg =>
             msg.id === assistantMessage.id
               ? {
@@ -345,6 +382,7 @@ function App() {
                     pages: metadata.pages || [],
                     images: metadata.images || [],
                   } : undefined,
+                  sourcePreviews: sourcePreviews,
                 }
               : msg
           );
@@ -368,7 +406,7 @@ function App() {
             );
           }
           
-          updateChatSession(finalMessages, sourcePreviews);
+          updateChatSession(finalMessages);
         } else if (data.type === 'error') {
           throw new Error(data.message);
         }
@@ -390,7 +428,7 @@ function App() {
         );
         
         setMessages(errorMessages);
-        updateChatSession(errorMessages, sourcePreviews);
+        updateChatSession(errorMessages);
         setIsLoading(false);
       };
 
@@ -409,6 +447,11 @@ function App() {
 
             const data = await response.json();
 
+            const sourcePreviews = data.sourcePreviews?.map((preview: any) => ({
+              ...preview,
+              id: crypto.randomUUID(),
+            })) || [];
+
             const finalMessages = updatedMessages.map(msg =>
               msg.id === assistantMessage.id
                 ? {
@@ -420,25 +463,20 @@ function App() {
                       pages: data.sources?.pages || [],
                       images: data.sources?.images || [],
                     },
+                    sourcePreviews: sourcePreviews,
                   }
                 : msg
             );
 
             setMessages(finalMessages);
-
-            let updatedSourcePreviews = sourcePreviews;
-            if (data.sourcePreviews) {
-              updatedSourcePreviews = [
-                ...sourcePreviews,
-                ...data.sourcePreviews.map((preview: any) => ({
-                  ...preview,
-                  id: crypto.randomUUID(),
-                }))
-              ];
-              setSourcePreviews(updatedSourcePreviews);
+            
+            if (sourcePreviews.length > 0) {
+              setCurrentSourcePreviews(sourcePreviews);
+              setSelectedMessageId(assistantMessage.id);
+              setShowReferences(true);
             }
 
-            updateChatSession(finalMessages, updatedSourcePreviews);
+            updateChatSession(finalMessages);
           } catch (error) {
             console.error('Fallback API request failed:', error);
           }
@@ -459,7 +497,7 @@ function App() {
       );
       
       setMessages(errorMessages);
-      updateChatSession(errorMessages, sourcePreviews);
+      updateChatSession(errorMessages);
     } finally {
       setIsLoading(false);
     }
@@ -497,12 +535,13 @@ function App() {
   const clearChat = () => {
     if (activeChatId) {
       setMessages([]);
-      setSourcePreviews([]);
-      updateChatSession([], []);
+      setCurrentSourcePreviews([]);
+      setSelectedMessageId(null);
+      updateChatSession([]);
     }
   };
 
-  const filteredSourcePreviews = sourcePreviews.filter(preview => {
+  const filteredSourcePreviews = currentSourcePreviews.filter(preview => {
     const matchesSearch = searchTerm
       ? preview.content.toLowerCase().includes(searchTerm.toLowerCase()) ||
         preview.title?.toLowerCase().includes(searchTerm.toLowerCase())
@@ -514,7 +553,7 @@ function App() {
   });
 
   const categories = Array.from(
-    new Set(sourcePreviews.map(preview => preview.category).filter(Boolean))
+    new Set(currentSourcePreviews.map(preview => preview.category).filter(Boolean))
   );
 
   // Current active chat (if any)
@@ -696,6 +735,7 @@ function App() {
                       className={`flex ${
                         message.role === 'user' ? 'justify-end' : 'justify-start'
                       } animate-slide-in`}
+                      onClick={() => handleMessageClick(message)}
                     >
                       {message.role === 'assistant' && (
                         <div className="w-8 h-8 rounded-full bg-primary-600 flex items-center justify-center mr-3 mt-1">
@@ -706,8 +746,12 @@ function App() {
                         className={`max-w-[80%] rounded-lg p-4 ${
                           message.role === 'user'
                             ? 'bg-primary-600 text-white'
-                            : 'bg-white dark:bg-gray-800 shadow-sm border border-gray-200 dark:border-gray-700'
-                        } transition-colors duration-200`}
+                            : `bg-white dark:bg-gray-800 shadow-sm border ${
+                                selectedMessageId === message.id 
+                                  ? 'border-primary-500 ring-2 ring-primary-200 dark:ring-primary-900' 
+                                  : 'border-gray-200 dark:border-gray-700'
+                              } cursor-pointer hover:shadow-md transition-all`
+                        }`}
                       >
                         {message.loading ? (
                           <div className="flex items-center gap-2">
@@ -754,17 +798,28 @@ function App() {
                               }`}>
                                 {formatDistanceToNow(message.timestamp, { addSuffix: true })}
                               </span>
-                              <button
-                                onClick={() => copyToClipboard(message.content)}
-                                className={`p-1 ${
-                                  message.role === 'user'
-                                    ? 'text-primary-100 hover:text-white'
-                                    : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
-                                } transition-colors`}
-                                title="Copy message"
-                              >
-                                <Copy size={16} />
-                              </button>
+                              <div className="flex items-center gap-2">
+                                {message.role === 'assistant' && message.sourcePreviews && message.sourcePreviews.length > 0 && (
+                                  <span className="text-gray-500 dark:text-gray-400 text-xs flex items-center gap-1">
+                                    <Image size={14} />
+                                    {message.sourcePreviews.length} sources
+                                  </span>
+                                )}
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    copyToClipboard(message.content);
+                                  }}
+                                  className={`p-1 ${
+                                    message.role === 'user'
+                                      ? 'text-primary-100 hover:text-white'
+                                      : 'text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300'
+                                  } transition-colors`}
+                                  title="Copy message"
+                                >
+                                  <Copy size={16} />
+                                </button>
+                              </div>
                             </div>
                           </div>
                         )}
@@ -785,19 +840,24 @@ function App() {
 
         {/* Input Form */}
         <div className="bg-white dark:bg-gray-800 border-t border-gray-200 dark:border-gray-700 px-6 py-4 transition-colors duration-200">
-          <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
+          <div className="max-w-4xl mx-auto">
             <div className="flex gap-4">
               <input
                 type="text"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    handleSubmit(e);
+                  }
+                }}
                 placeholder="Ask a question..."
                 className="flex-1 rounded-lg border border-gray-300 dark:border-gray-600 bg-white dark:bg-gray-700 text-gray-900 dark:text-gray-100 placeholder-gray-500 dark:placeholder-gray-400 px-4 py-2 focus:outline-none focus:ring-2 focus:ring-primary-500 disabled:opacity-50 transition-colors duration-200"
                 disabled={isLoading}
               />
               <div className="flex gap-2">
                 <button
-                  type="submit"
+                  onClick={handleSubmit}
                   disabled={isLoading || !input.trim()}
                   className="bg-primary-600 text-white px-6 py-2 rounded-lg hover:bg-primary-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-colors"
                 >
@@ -810,7 +870,7 @@ function App() {
                 </button>
               </div>
             </div>
-          </form>
+          </div>
         </div>
       </div>
 
@@ -823,7 +883,14 @@ function App() {
         <div className="h-full flex flex-col">
           <div className="p-4 border-b border-gray-200 dark:border-gray-700">
             <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">References</h2>
+              <h2 className="text-lg font-semibold text-gray-800 dark:text-gray-200">
+                References
+                {selectedMessageId && (
+                  <span className="text-sm font-normal text-gray-500 dark:text-gray-400 ml-2">
+                    ({filteredSourcePreviews.length} sources)
+                  </span>
+                )}
+              </h2>
               <button
                 onClick={() => setShowReferences(false)}
                 className="p-1 text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 transition-colors"
@@ -860,55 +927,64 @@ function App() {
             )}
           </div>
           <div className="flex-1 overflow-y-auto p-4">
-            <div className="space-y-4">
-              {filteredSourcePreviews.map((preview) => (
-                <div
-                  key={preview.id}
-                  className="bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 p-4 hover:border-primary-300 dark:hover:border-primary-600 transition-all duration-200"
-                >
-                  {preview.title && (
-                    <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1">{preview.title}</h3>
-                  )}
-                  <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 mb-2">
-                    <span>Page {preview.page}</span>
-                    {preview.date && (
-                      <>
-                        <span>•</span>
-                        <span>{formatDistanceToNow(preview.date, { addSuffix: true })}</span>
-                      </>
+            {currentSourcePreviews.length === 0 ? (
+              <div className="text-center py-8">
+                <Image size={48} className="mx-auto text-gray-300 dark:text-gray-600 mb-4" />
+                <p className="text-gray-500 dark:text-gray-400">
+                  Click on an AI response to view its sources
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {filteredSourcePreviews.map((preview) => (
+                  <div
+                    key={preview.id}
+                    className="bg-white dark:bg-gray-700 rounded-lg border border-gray-200 dark:border-gray-600 p-4 hover:border-primary-300 dark:hover:border-primary-600 transition-all duration-200"
+                  >
+                    {preview.title && (
+                      <h3 className="font-medium text-gray-900 dark:text-gray-100 mb-1">{preview.title}</h3>
+                    )}
+                    <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400 mb-2">
+                      <span>Page {preview.page}</span>
+                      {preview.date && (
+                        <>
+                          <span>•</span>
+                          <span>{formatDistanceToNow(preview.date, { addSuffix: true })}</span>
+                        </>
+                      )}
+                    </div>
+                    <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">{preview.content}</p>
+                    {preview.imageUrl && (
+                      <div className="relative aspect-video bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden group">
+                        <img
+                          src={preview.imageUrl}
+                          alt={preview.title || `Preview from page ${preview.page}`}
+                          className="w-full h-full object-contain p-2"
+                          loading="lazy"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3">
+                          <button
+                            onClick={() => preview.imageUrl && setSelectedImage(preview.imageUrl)}
+                            className="text-white text-sm hover:text-primary-200 flex items-center gap-1"
+                          >
+                            <Maximize2 size={14} />
+                            <span>View Full Size</span>
+                          </button>
+                          <a
+                            href={preview.imageUrl}
+                            download
+                            className="text-white text-sm hover:text-primary-200 flex items-center gap-1"
+                          >
+                            <Download size={14} />
+                            <span>Download</span>
+                          </a>
+                        </div>
+                      </div>
                     )}
                   </div>
-                  <p className="text-sm text-gray-600 dark:text-gray-300 mb-4">{preview.content}</p>
-                  {preview.imageUrl && (
-                    <div className="relative aspect-video bg-gray-50 dark:bg-gray-800 rounded-md overflow-hidden group">
-                      <img
-                        src={preview.imageUrl}
-                        alt={preview.title || `Preview from page ${preview.page}`}
-                        className="w-full h-full object-contain p-2"
-                        loading="lazy"
-                      />
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent opacity-0 group-hover:opacity-100 transition-opacity flex items-end justify-between p-3">
-                        <button
-                          onClick={() => preview.imageUrl && setSelectedImage(preview.imageUrl)}
-                          className="text-white text-sm hover:text-primary-200 flex items-center gap-1"
-                        >
-                          <Maximize2 size={14} />
-                          <span>View Full Size</span>
-                        </button>
-                        <a
-                          href={preview.imageUrl}
-                          download
-                          className="text-white text-sm hover:text-primary-200 flex items-center gap-1"
-                        >
-                          <Download size={14} />
-                          <span>Download</span>
-                        </a>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>
