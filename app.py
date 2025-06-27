@@ -51,7 +51,7 @@ class FrontendConfig:
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.getenv("AZURE_OPENAI_EMBEDDING_DEPLOYED_MODEL_NAME")
     SEARCH_SERVICE_ENDPOINT = os.getenv("AZURE_SEARCH_SERVICE_ENDPOINT")
     SEARCH_SERVICE_KEY = os.getenv("AZURE_SEARCH_ADMIN_KEY")
-    INDEX_NAME = "azure-multimodal-search-new-new"
+    INDEX_NAME = "azure-multimodal-search-new1"
     BLOB_CONTAINER = os.getenv("BLOB_CONTAINER_NAME", "rag-demo-images")
     STORAGE_ACCOUNT_NAME = os.getenv("AZURE_STORAGE_ACCOUNT_NAME")
     SAS_TOKEN = os.getenv("AZURE_STORAGE_SAS_TOKEN")
@@ -129,7 +129,7 @@ def detect_current_embedding_model():
     return model_name, embedding_dim
 
 # ================== Text Chunking Utilities ==================
-def count_tokens(text: str, model_name: str = "text-embedding-ada-002") -> int:
+def count_tokens(text: str, model_name: str = "text-embedding-3-large") -> int:
     """Count tokens in text for the given model."""
     try:
         encoding = tiktoken.get_encoding("cl100k_base")
@@ -364,8 +364,8 @@ def initialize_engine():
             logger.warning(f"Reverting to text-embedding-ada-002 to match your index")
             
             # Force use of ada-002 model to match index
-            actual_embedding_model = "text-embedding-ada-002"
-            actual_dimensions = 1536
+            actual_embedding_model = "text-embedding-3-large"
+            actual_dimensions = 3072
         else:
             actual_embedding_model = embedding_model
             actual_dimensions = model_dimensions

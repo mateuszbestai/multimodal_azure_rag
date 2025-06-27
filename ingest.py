@@ -55,7 +55,7 @@ AZURE_DOC_INTELLIGENCE_ENDPOINT = os.getenv("AZURE_DOC_INTELLIGENCE_ENDPOINT")
 AZURE_DOC_INTELLIGENCE_KEY = os.getenv("AZURE_DOC_INTELLIGENCE_KEY")
 BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = "rag-demo-images"
-INDEX_NAME = "azure-multimodal-search-new"
+INDEX_NAME = "azure-multimodal-search-new1"
 DOWNLOAD_PATH = "pdf-files"
 
 # Initialize Azure OpenAI settings first
@@ -242,7 +242,7 @@ def create_vector_store(
         id_field_key="id",
         chunk_field_key="full_text",
         embedding_field_key="embedding",
-        embedding_dimensionality=1536,
+        embedding_dimensionality=3072,
         metadata_string_field_key="metadata",
         doc_id_field_key="doc_id",
         filterable_metadata_field_keys=metadata_fields,
