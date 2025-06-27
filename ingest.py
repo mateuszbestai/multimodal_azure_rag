@@ -9,6 +9,8 @@ from copy import deepcopy
 from typing import Optional, Dict, List
 from dotenv import load_dotenv
 import nest_asyncio
+import io
+from PIL import Image
 
 # Azure imports
 from azure.core.credentials import AzureKeyCredential
@@ -33,6 +35,7 @@ from llama_index.vector_stores.azureaisearch import (
 # Async imports
 import asyncio
 from azure.storage.blob.aio import BlobServiceClient
+import aiofiles
 
 from excel_ingest import ExcelProcessor
 
@@ -57,6 +60,12 @@ BLOB_CONNECTION_STRING = os.getenv("BLOB_CONNECTION_STRING")
 BLOB_CONTAINER_NAME = "rag-demo-images"
 INDEX_NAME = "azure-multimodal-search-new1"
 DOWNLOAD_PATH = "pdf-files"
+
+# Optimization settings
+IMAGE_DPI = 100  # Reduced from 150 for faster processing
+IMAGE_FORMAT = "JPEG"  # Changed from PNG for smaller files
+IMAGE_QUALITY = 85  # JPEG quality (1-100)
+MAX_CONCURRENT_UPLOADS = 15  # Increased from 5
 
 # Initialize Azure OpenAI settings first
 Settings.llm = AzureOpenAI(
@@ -115,8 +124,8 @@ def create_folder_structure(base_path: str, pdf_path: str) -> str:
     folder_path.mkdir(parents=True, exist_ok=True)
     return str(folder_path)
 
-def pdf_to_images(pdf_path: str, output_base: str) -> List[dict]:
-    """Convert PDF to images with enhanced error handling."""
+def pdf_to_images_optimized(pdf_path: str, output_base: str) -> List[dict]:
+    """Convert PDF to optimized images with lower DPI and JPEG format."""
     image_dicts = []
     folder_path = create_folder_structure(output_base, pdf_path)
     
@@ -129,11 +138,17 @@ def pdf_to_images(pdf_path: str, output_base: str) -> List[dict]:
         for page_num in range(len(doc)):
             try:
                 page = doc.load_page(page_num)
-                pix = page.get_pixmap(dpi=150, colorspace=fitz.csRGB, alpha=False)
-                image_name = f"page_{page_num+1}.png"
+                # Lower DPI for smaller files
+                pix = page.get_pixmap(dpi=IMAGE_DPI, colorspace=fitz.csRGB, alpha=False)
+                
+                # Save as JPEG instead of PNG
+                image_name = f"page_{page_num+1}.jpg"
                 image_path = str(Path(folder_path) / image_name)
                 
-                pix.save(image_path)
+                # Convert to PIL Image for JPEG saving with quality control
+                img_data = pix.pil_tobytes(format="JPEG", optimize=True)
+                img = Image.open(io.BytesIO(img_data))
+                img.save(image_path, "JPEG", quality=IMAGE_QUALITY, optimize=True)
                 
                 image_dicts.append({
                     "name": image_name,
@@ -160,7 +175,8 @@ def extract_document_data(pdf_path: str) -> dict:
         poller = document_analysis_client.begin_analyze_document("prebuilt-document", document=f)
         result = poller.result()
 
-    image_dicts = pdf_to_images(pdf_path, DOWNLOAD_PATH)
+    # Use optimized image conversion
+    image_dicts = pdf_to_images_optimized(pdf_path, DOWNLOAD_PATH)
 
     return {
         "text_content": result.content,
@@ -169,37 +185,84 @@ def extract_document_data(pdf_path: str) -> dict:
         "source_path": pdf_path
     }
 
-# ================== Azure Blob Storage ==================
-async def create_container_if_not_exists():
-    """Ensure the blob container exists."""
-    async with BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING) as blob_service_client:
-        container_client = blob_service_client.get_container_client(BLOB_CONTAINER_NAME)
+# ================== Optimized Azure Blob Storage ==================
+class OptimizedBlobUploader:
+    """Optimized blob uploader with connection reuse and better concurrency."""
+    
+    def __init__(self, connection_string: str, container_name: str):
+        self.connection_string = connection_string
+        self.container_name = container_name
+        self.blob_service_client = None
+        
+    async def __aenter__(self):
+        self.blob_service_client = BlobServiceClient.from_connection_string(
+            self.connection_string
+        )
+        # Ensure container exists
+        container_client = self.blob_service_client.get_container_client(self.container_name)
         if not await container_client.exists():
             await container_client.create_container()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if self.blob_service_client:
+            await self.blob_service_client.close()
+    
+    async def upload_images_batch(self, image_dicts: List[dict]) -> Dict[str, str]:
+        """Upload images in batch with high concurrency."""
+        semaphore = asyncio.Semaphore(MAX_CONCURRENT_UPLOADS)
+        tasks = []
+        
+        for img in image_dicts:
+            task = self._upload_single_optimized(img, semaphore)
+            tasks.append(task)
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Process results
+        uploaded_urls = {}
+        for img, result in zip(image_dicts, results):
+            if isinstance(result, Exception):
+                logging.error(f"Upload failed for {img['name']}: {str(result)}")
+            elif result:
+                uploaded_urls[img["name"]] = result
+                
+        return uploaded_urls
+    
+    async def _upload_single_optimized(self, image: dict, semaphore: asyncio.Semaphore) -> Optional[str]:
+        """Upload single image with optimization."""
+        async with semaphore:
+            try:
+                blob_name = image["name"]
+                
+                # Read file asynchronously
+                async with aiofiles.open(image["path"], "rb") as f:
+                    image_data = await f.read()
+                
+                # Get blob client
+                blob_client = self.blob_service_client.get_blob_client(
+                    container=self.container_name,
+                    blob=blob_name
+                )
+                
+                # Upload with optimized settings
+                await blob_client.upload_blob(
+                    image_data, 
+                    overwrite=True,
+                    max_concurrency=4,  # Parallel chunk upload
+                    length=len(image_data)
+                )
+                
+                return blob_client.url
+                
+            except Exception as e:
+                logging.error(f"Upload failed for {image['name']}: {str(e)}")
+                return None
 
 async def upload_images_concurrently(image_dicts: List[dict]) -> Dict[str, str]:
-    """Upload images with concurrency control."""
-    await create_container_if_not_exists()
-    
-    semaphore = asyncio.Semaphore(5)
-    tasks = [upload_single_image(img, semaphore) for img in image_dicts]
-    results = await asyncio.gather(*tasks)
-    
-    return {img["name"]: url for img, url in zip(image_dicts, results) if url}
-
-async def upload_single_image(image: dict, semaphore: asyncio.Semaphore) -> Optional[str]:
-    """Upload individual image with error handling."""
-    async with semaphore:
-        try:
-            async with BlobServiceClient.from_connection_string(BLOB_CONNECTION_STRING) as service_client:
-                container_client = service_client.get_container_client(BLOB_CONTAINER_NAME)
-                blob_client = container_client.get_blob_client(image["name"])
-                with open(image["path"], "rb") as data:
-                    await blob_client.upload_blob(data, overwrite=True)
-                    return blob_client.url
-        except Exception as e:
-            logging.error(f"Upload failed for {image['name']}: {str(e)}")
-            return None
+    """Upload images using optimized uploader."""
+    async with OptimizedBlobUploader(BLOB_CONNECTION_STRING, BLOB_CONTAINER_NAME) as uploader:
+        return await uploader.upload_images_batch(image_dicts)
 
 # ================== Search Index Integration ==================
 def create_search_nodes(document_data: dict, image_urls: Dict[str, str]) -> List[TextNode]:
@@ -293,13 +356,25 @@ async def process_document(file_path: str) -> RetrieverQueryEngine:
 
 # ================== Main Processing Pipeline ==================
 async def process_pdf_document(pdf_path: str) -> RetrieverQueryEngine:
-    """Process PDF documents (your existing logic)."""
-    document_data = extract_document_data(pdf_path)
-    image_urls = await upload_images_concurrently(document_data["images"])
-    logging.info(f"Uploaded {len(image_urls)} images")
+    """Process PDF documents with optimized image handling."""
+    start_time = time.time()
     
+    # Extract document data
+    document_data = extract_document_data(pdf_path)
+    extract_time = time.time() - start_time
+    logging.info(f"Document extraction took {extract_time:.2f}s")
+    
+    # Upload images with optimized settings
+    upload_start = time.time()
+    image_urls = await upload_images_concurrently(document_data["images"])
+    upload_time = time.time() - upload_start
+    logging.info(f"Uploaded {len(image_urls)} images in {upload_time:.2f}s")
+    
+    # Create search nodes
     nodes = create_search_nodes(document_data, image_urls)
     
+    # Create index
+    index_start = time.time()
     index = create_or_load_index(
         text_nodes=nodes,
         index_client=index_client,
@@ -307,11 +382,16 @@ async def process_pdf_document(pdf_path: str) -> RetrieverQueryEngine:
         llm=Settings.llm,
         use_existing_index=False
     )
+    index_time = time.time() - index_start
+    logging.info(f"Index creation took {index_time:.2f}s")
 
     response_synthesizer = get_response_synthesizer(
         llm=Settings.llm,
         response_mode="compact"
     )
+    
+    total_time = time.time() - start_time
+    logging.info(f"Total processing time: {total_time:.2f}s")
     
     return RetrieverQueryEngine(
         retriever=index.as_retriever(similarity_top_k=3),
@@ -321,7 +401,7 @@ async def process_pdf_document(pdf_path: str) -> RetrieverQueryEngine:
 async def process_excel_document(excel_path: str) -> RetrieverQueryEngine:
     """Process Excel documents using the new ExcelProcessor."""
     try:
-        # Initialize Excel processor
+        # Initialize Excel processor with optimized settings
         excel_processor = ExcelProcessor(
             blob_connection_string=BLOB_CONNECTION_STRING,
             container_name=BLOB_CONTAINER_NAME
@@ -331,10 +411,11 @@ async def process_excel_document(excel_path: str) -> RetrieverQueryEngine:
         logging.info(f"Processing Excel file: {excel_path}")
         excel_data = await excel_processor.process_excel_file(excel_path)
         
-        # Upload any extracted images
+        # Upload any extracted images with optimization
         image_urls = {}
         if excel_data.get("images"):
-            image_urls = await excel_processor.upload_images_to_blob(excel_data["images"])
+            async with OptimizedBlobUploader(BLOB_CONNECTION_STRING, BLOB_CONTAINER_NAME) as uploader:
+                image_urls = await uploader.upload_images_batch(excel_data["images"])
             logging.info(f"Uploaded {len(image_urls)} Excel images")
         
         # Create search nodes
@@ -429,6 +510,13 @@ def main():
         ]
     )
     
+    # Log optimization settings
+    logging.info(f"Starting with optimized settings:")
+    logging.info(f"  - Image DPI: {IMAGE_DPI}")
+    logging.info(f"  - Image Format: {IMAGE_FORMAT}")
+    logging.info(f"  - Image Quality: {IMAGE_QUALITY}")
+    logging.info(f"  - Max Concurrent Uploads: {MAX_CONCURRENT_UPLOADS}")
+    
     try:
         if args.batch:
             # Process entire directory
@@ -439,7 +527,13 @@ def main():
             summary = {
                 "processed_files": list(query_engines.keys()),
                 "total_count": len(query_engines),
-                "timestamp": time.time()
+                "timestamp": time.time(),
+                "optimization_settings": {
+                    "image_dpi": IMAGE_DPI,
+                    "image_format": IMAGE_FORMAT,
+                    "image_quality": IMAGE_QUALITY,
+                    "max_concurrent_uploads": MAX_CONCURRENT_UPLOADS
+                }
             }
             
             output_dir = Path(args.output_dir)
@@ -467,13 +561,3 @@ def main():
 
 if __name__ == '__main__':
     exit(main())
-
-# if __name__ == '__main__':
-#     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-#     pdf_path = "data/pdfs/new-relic-2024-observability-forecast-report.pdf"
-    
-#     try:
-#         query_engine = asyncio.run(process_document(pdf_path))
-#         logging.info("Processing completed successfully")
-#     except Exception as e:
-#         logging.error(f"Fatal error: {str(e)}")
